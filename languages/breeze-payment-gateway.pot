@@ -1,0 +1,154 @@
+# Copyright (C) 2026 Breeze Payment Gateway
+# This file is distributed under the GPL v2 or later.
+msgid ""
+msgstr ""
+"Project-Id-Version: Breeze Payment Gateway 1.0.0\n"
+"Report-Msgid-Bugs-To: https://breeze.cash/contact\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"POT-Creation-Date: 2026-01-29T00:00:00+00:00\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"X-Generator: WP-CLI 2.6.0\n"
+"X-Domain: breeze-payment-gateway\n"
+
+#. Plugin Name of the plugin
+msgid "Breeze Payment Gateway"
+msgstr ""
+
+#. Plugin URI of the plugin
+msgid "https://breeze.cash"
+msgstr ""
+
+#. Description of the plugin
+msgid "Accept payments through Breeze payment gateway for WooCommerce"
+msgstr ""
+
+#. Author of the plugin
+msgid "Your Name"
+msgstr ""
+
+msgid "Settings"
+msgstr ""
+
+msgid "Accept payments through Breeze payment gateway. Customers will be redirected to Breeze to complete payment."
+msgstr ""
+
+msgid "Enable/Disable"
+msgstr ""
+
+msgid "Enable Breeze Payment Gateway"
+msgstr ""
+
+msgid "Title"
+msgstr ""
+
+msgid "This controls the title which the user sees during checkout."
+msgstr ""
+
+msgid "Breeze Payment"
+msgstr ""
+
+msgid "Description"
+msgstr ""
+
+msgid "Payment method description that the customer will see on your checkout."
+msgstr ""
+
+msgid "Pay securely using Breeze payment gateway."
+msgstr ""
+
+msgid "Test Mode"
+msgstr ""
+
+msgid "Enable Test Mode"
+msgstr ""
+
+msgid "Place the payment gateway in test mode using test API credentials."
+msgstr ""
+
+msgid "Test API Key"
+msgstr ""
+
+msgid "Get your API key from your Breeze dashboard."
+msgstr ""
+
+msgid "Live API Key"
+msgstr ""
+
+msgid "Debug Log"
+msgstr ""
+
+msgid "Enable Logging"
+msgstr ""
+
+msgid "Log Breeze events inside %s"
+msgstr ""
+
+msgid "TEST MODE ENABLED. No real payments will be processed."
+msgstr ""
+
+msgid "Failed to create customer in Breeze."
+msgstr ""
+
+msgid "Failed to create products in Breeze."
+msgstr ""
+
+msgid "Failed to create payment page in Breeze."
+msgstr ""
+
+msgid "Awaiting Breeze payment."
+msgstr ""
+
+msgid "Payment error: "
+msgstr ""
+
+msgid "Shipping"
+msgstr ""
+
+msgid "Tax"
+msgstr ""
+
+msgid "Payment completed via Breeze."
+msgstr ""
+
+msgid "Payment failed or cancelled by customer."
+msgstr ""
+
+msgid "Payment was not completed. Please try again."
+msgstr ""
+
+msgid "Invalid order."
+msgstr ""
+
+msgid "Refunds must be processed manually through your Breeze dashboard."
+msgstr ""
+
+msgid "Payment confirmed via Breeze webhook. Transaction ID: %s"
+msgstr ""
+
+msgid "Payment failed via Breeze webhook notification."
+msgstr ""
+
+msgid "Preferred Payment Methods"
+msgstr ""
+
+msgid "Select which payment methods to show on the Breeze checkout page. If none selected, all methods will be available."
+msgstr ""
+
+msgid "Apple Pay"
+msgstr ""
+
+msgid "Google Pay"
+msgstr ""
+
+msgid "Card (Manual Card Payment)"
+msgstr ""
+
+msgid "Crypto"
+msgstr ""
+
+msgid "Discount"
+msgstr ""

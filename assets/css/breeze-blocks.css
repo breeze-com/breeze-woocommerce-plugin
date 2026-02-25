@@ -1,0 +1,18 @@
+/**
+ * Breeze Payment Gateway - Blocks Styles
+ */
+
+.wc-block-components-payment-method-content .breeze-test-mode-notice {
+    background-color: #fff3cd;
+    border: 1px solid #ffc107;
+    border-radius: 4px;
+    padding: 10px;
+    color: #856404;
+    font-size: 14px;
+    margin-top: 10px;
+}
+
+.wc-block-components-payment-method-label {
+    display: flex;
+    align-items: center;
+}

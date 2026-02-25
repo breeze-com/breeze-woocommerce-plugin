@@ -1,0 +1,58 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: mywoo_db
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    environment:
+      MYSQL_DATABASE: ${WORDPRESS_DB_NAME}
+      MYSQL_USER: ${WORDPRESS_DB_USER}
+      MYSQL_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${WORDPRESS_DB_ROOT_PASSWORD}
+    volumes:
+      - db_data:/var/lib/mysql
+
+  wordpress:
+    image: wordpress:php8.2-apache
+    container_name: mywoo_wp
+    restart: unless-stopped
+    user: "33:33"
+    env_file:
+      - ./.env
+    depends_on:
+      - db
+    ports:
+      - "${PORT}:80"
+    environment:
+      WORDPRESS_DB_HOST: ${WORDPRESS_DB_HOST}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME}
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      BREEZE_API_BASE_URL: ${BREEZE_API_BASE_URL:-https://api.breeze.cash}
+    volumes:
+      - wp_data:/var/www/html
+      - ./:/var/www/html/wp-content/plugins/breeze-payment-gateway
+
+  wpcli:
+    image: wordpress:cli-php8.2
+    container_name: mywoo_wpcli
+    depends_on:
+      - db
+      - wordpress
+    env_file:
+      - ./.env
+    environment:
+      WORDPRESS_DB_HOST: ${WORDPRESS_DB_HOST}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME}
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+    volumes:
+      - wp_data:/var/www/html
+      - ./:/var/www/html/wp-content/plugins/breeze-payment-gateway
+      - ./scripts:/scripts:ro
+    entrypoint: ["bash", "-lc"]
+
+volumes:
+  db_data:
+  wp_data:
