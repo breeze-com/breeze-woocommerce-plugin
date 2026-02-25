@@ -1,6 +1,6 @@
 # Breeze Payment Gateway for WooCommerce
 [![WooCommerce](https://img.shields.io/badge/WooCommerce-6.0%2B-purple.svg)](https://woocommerce.com/)
-[![Version](https://img.shields.io/badge/version-1.0.1-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
+[![Version](https://img.shields.io/badge/version-1.0.2-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
 
 ![Breeze Payment Gateway](.github/images/banner.png)
 
