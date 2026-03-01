@@ -514,11 +514,16 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             $args['body'] = wp_json_encode( $data );
         }
 
-        // Log request
+        // Log request (redact sensitive fields)
         if ( $this->debug ) {
+            $safe_data = $data;
+            unset( $safe_data['billingEmail'] );
+            if ( isset( $safe_data['customer'] ) ) {
+                $safe_data['customer'] = '[redacted]';
+            }
             $this->log->debug(
                 sprintf( 'Breeze API Request: %s %s', $method, $url ),
-                array( 'source' => $this->id, 'data' => $data )
+                array( 'source' => $this->id, 'data' => $safe_data )
             );
         }
 
@@ -652,28 +657,103 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Process refund
+     * Process refund via Breeze API.
      *
-     * @param int $order_id Order ID.
-     * @param float $amount Refund amount.
-     * @param string $reason Refund reason.
-     * @return boolean|WP_Error
+     * Breeze refund endpoint: POST /v1/payment_pages/{pageId}/refund
+     * Body: { "amount": <cents>, "reason": "..." }
+     *
+     * Supports both full and partial refunds. WooCommerce handles multiple
+     * partial refunds by calling this method once per refund request.
+     *
+     * @param int    $order_id Order ID.
+     * @param float  $amount   Refund amount (in major currency units, e.g. 9.99).
+     * @param string $reason   Refund reason.
+     * @return boolean|WP_Error True on success, WP_Error on failure.
      */
     public function process_refund( $order_id, $amount = null, $reason = '' ) {
-        
+
         $order = wc_get_order( $order_id );
 
         if ( ! $order ) {
             return new WP_Error( 'invalid_order', __( 'Invalid order.', 'breeze-payment-gateway' ) );
         }
 
-        // Note: Breeze API refund implementation would go here
-        // For now, we'll return an error indicating manual refund is needed
-        
-        return new WP_Error( 
-            'refund_not_supported', 
-            __( 'Refunds must be processed manually through your Breeze dashboard.', 'breeze-payment-gateway' ) 
+        $page_id = $order->get_meta( '_breeze_payment_page_id' );
+
+        if ( empty( $page_id ) ) {
+            return new WP_Error(
+                'missing_page_id',
+                __( 'Cannot refund — no Breeze payment page ID found on this order.', 'breeze-payment-gateway' )
+            );
+        }
+
+        if ( ! $amount || $amount <= 0 ) {
+            return new WP_Error(
+                'invalid_amount',
+                __( 'Refund amount must be greater than zero.', 'breeze-payment-gateway' )
+            );
+        }
+
+        $refund_data = array(
+            'amount' => (int) round( $amount * 100 ), // Convert to cents
         );
+
+        if ( ! empty( $reason ) ) {
+            $refund_data['reason'] = sanitize_text_field( $reason );
+        }
+
+        // Log refund attempt
+        if ( $this->debug ) {
+            $this->log->info(
+                sprintf( 'Processing refund for order #%s: %s %s (page: %s)',
+                    $order_id,
+                    $amount,
+                    $order->get_currency(),
+                    $page_id
+                ),
+                array( 'source' => $this->id )
+            );
+        }
+
+        $result = $this->breeze_api_request(
+            'POST',
+            '/v1/payment_pages/' . $page_id . '/refund',
+            $refund_data
+        );
+
+        if ( ! $result ) {
+            return new WP_Error(
+                'refund_failed',
+                __( 'Breeze refund API request failed. Check the debug log for details, or process the refund from the Breeze dashboard.', 'breeze-payment-gateway' )
+            );
+        }
+
+        // Extract refund ID if available
+        $refund_id = '';
+        if ( isset( $result['data']['id'] ) ) {
+            $refund_id = $result['data']['id'];
+        } elseif ( isset( $result['id'] ) ) {
+            $refund_id = $result['id'];
+        }
+
+        $order->add_order_note(
+            sprintf(
+                __( 'Refund of %s %s processed via Breeze. Refund ID: %s. Reason: %s', 'breeze-payment-gateway' ),
+                $amount,
+                $order->get_currency(),
+                $refund_id ? $refund_id : 'N/A',
+                $reason ? $reason : 'N/A'
+            )
+        );
+
+        if ( $this->debug ) {
+            $this->log->info(
+                sprintf( 'Refund successful for order #%s. Refund ID: %s', $order_id, $refund_id ),
+                array( 'source' => $this->id )
+            );
+        }
+
+        return true;
     }
 
     /**
@@ -711,11 +791,14 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             return;
         }
 
-        // Log verified webhook
+        // Log verified webhook (redact PII — only log event type and order reference)
         if ( $this->debug ) {
             $this->log->debug(
-                'Breeze webhook received and verified',
-                array( 'source' => $this->id, 'data' => $webhook_data )
+                sprintf( 'Breeze webhook verified: type=%s, ref=%s',
+                    isset( $webhook_data['type'] ) ? $webhook_data['type'] : 'unknown',
+                    isset( $webhook_data['data']['clientReferenceId'] ) ? $webhook_data['data']['clientReferenceId'] : 'none'
+                ),
+                array( 'source' => $this->id )
             );
         }
 
@@ -762,10 +845,12 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // Webhook secret is required. Without it, signature verification is impossible
         // and any caller could spoof payment events — reject all webhooks.
         if ( empty( $this->webhook_secret ) ) {
-            $this->log->error(
-                'Webhook rejected: no webhook secret configured. Set the Webhook Secret in WooCommerce > Settings > Payments > Breeze.',
-                array( 'source' => $this->id )
-            );
+            if ( $this->log ) {
+                $this->log->error(
+                    'Webhook rejected: no webhook secret configured. Set the Webhook Secret in WooCommerce > Settings > Payments > Breeze.',
+                    array( 'source' => $this->id )
+                );
+            }
             return false;
         }
 
@@ -834,32 +919,90 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
+     * Extract and validate order from webhook data.
+     *
+     * @param array $data Webhook data.
+     * @return WC_Order|false Order object or false on failure.
+     */
+    private function get_order_from_webhook( $data ) {
+
+        if ( ! isset( $data['clientReferenceId'] ) ) {
+            if ( $this->debug ) {
+                $this->log->warning( 'Webhook missing clientReferenceId', array( 'source' => $this->id ) );
+            }
+            return false;
+        }
+
+        // Extract order ID — use absint() to sanitize
+        $raw_id  = str_replace( 'order-', '', $data['clientReferenceId'] );
+        $order_id = absint( $raw_id );
+
+        if ( ! $order_id ) {
+            if ( $this->debug ) {
+                $this->log->warning(
+                    sprintf( 'Webhook has invalid order reference: %s', $data['clientReferenceId'] ),
+                    array( 'source' => $this->id )
+                );
+            }
+            return false;
+        }
+
+        $order = wc_get_order( $order_id );
+
+        if ( ! $order ) {
+            if ( $this->debug ) {
+                $this->log->warning(
+                    sprintf( 'Webhook references non-existent order #%d', $order_id ),
+                    array( 'source' => $this->id )
+                );
+            }
+            return false;
+        }
+
+        // Verify the payment page ID matches what we stored on this order.
+        // This prevents a valid webhook for order A from being used to mark order B as paid.
+        $stored_page_id  = $order->get_meta( '_breeze_payment_page_id' );
+        $webhook_page_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
+
+        if ( $stored_page_id && $webhook_page_id && $stored_page_id !== $webhook_page_id ) {
+            if ( $this->debug ) {
+                $this->log->error(
+                    sprintf(
+                        'Webhook page ID mismatch for order #%d: stored=%s, webhook=%s',
+                        $order_id, $stored_page_id, $webhook_page_id
+                    ),
+                    array( 'source' => $this->id )
+                );
+            }
+            return false;
+        }
+
+        return $order;
+    }
+
+    /**
      * Handle payment success webhook
      *
      * @param array $data Webhook data.
      */
     private function handle_payment_success_webhook( $data ) {
-        
-        if ( ! isset( $data['clientReferenceId'] ) ) {
-            return;
-        }
 
-        // Extract order ID from client reference
-        $order_id = str_replace( 'order-', '', $data['clientReferenceId'] );
-        $order = wc_get_order( $order_id );
+        $order = $this->get_order_from_webhook( $data );
 
         if ( ! $order ) {
             return;
         }
 
         if ( ! $order->is_paid() ) {
-            $order->payment_complete( isset( $data['pageId'] ) ? $data['pageId'] : '' );
+            $transaction_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
+            $order->payment_complete( $transaction_id );
             $order->add_order_note(
                 sprintf(
                     __( 'Payment confirmed via Breeze webhook. Transaction ID: %s', 'breeze-payment-gateway' ),
-                    isset( $data['pageId'] ) ? $data['pageId'] : 'N/A'
+                    $transaction_id ? $transaction_id : 'N/A'
                 )
             );
+            // payment_complete() triggers wc_reduce_stock_levels() automatically in WC 3.0+
         }
     }
 
@@ -869,20 +1012,54 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
      * @param array $data Webhook data.
      */
     private function handle_payment_failed_webhook( $data ) {
-        
-        if ( ! isset( $data['clientReferenceId'] ) ) {
-            return;
-        }
 
-        // Extract order ID from client reference
-        $order_id = str_replace( 'order-', '', $data['clientReferenceId'] );
-        $order = wc_get_order( $order_id );
+        $order = $this->get_order_from_webhook( $data );
 
         if ( ! $order ) {
             return;
         }
 
+        // Do NOT override a paid order with a failed status.
+        // A delayed failure webhook could arrive after a success webhook.
+        if ( $order->is_paid() ) {
+            if ( $this->debug ) {
+                $this->log->warning(
+                    sprintf( 'Ignoring failure webhook for already-paid order #%d', $order->get_id() ),
+                    array( 'source' => $this->id )
+                );
+            }
+            return;
+        }
+
         $order->update_status( 'failed', __( 'Payment failed via Breeze webhook notification.', 'breeze-payment-gateway' ) );
+    }
+
+    /**
+     * Supported currencies. Breeze currently supports USD only.
+     * Override via filter: add_filter( 'breeze_supported_currencies', fn($c) => array_merge($c, ['EUR']) );
+     *
+     * @return array
+     */
+    private function get_supported_currencies() {
+        return apply_filters( 'breeze_supported_currencies', array( 'USD' ) );
+    }
+
+    /**
+     * Only show the gateway if the store currency is supported by Breeze.
+     *
+     * @return boolean
+     */
+    public function is_available() {
+        if ( ! parent::is_available() ) {
+            return false;
+        }
+
+        $currency = get_woocommerce_currency();
+        if ( ! in_array( $currency, $this->get_supported_currencies(), true ) ) {
+            return false;
+        }
+
+        return true;
     }
 
     /**

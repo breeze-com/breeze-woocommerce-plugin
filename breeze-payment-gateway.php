@@ -30,9 +30,16 @@ define( 'BREEZE_PAYMENT_GATEWAY_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'BREEZE_PAYMENT_GATEWAY_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 
 /**
- * Check if WooCommerce is active
+ * Check if WooCommerce is active (supports multisite network activation)
  */
-if ( ! in_array( 'woocommerce/woocommerce.php', apply_filters( 'active_plugins', get_option( 'active_plugins' ) ) ) ) {
+$active_plugins = apply_filters( 'active_plugins', get_option( 'active_plugins' ) );
+if ( is_multisite() ) {
+    $network_plugins = get_site_option( 'active_sitewide_plugins', array() );
+    if ( isset( $network_plugins['woocommerce/woocommerce.php'] ) ) {
+        $active_plugins[] = 'woocommerce/woocommerce.php';
+    }
+}
+if ( ! in_array( 'woocommerce/woocommerce.php', $active_plugins ) ) {
     return;
 }
 
