@@ -777,9 +777,11 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         );
 
         if ( ! $result ) {
+            // Common failure: crypto payments cannot be refunded via API
+            // (no card to reverse — requires wallet address or manual process)
             return new WP_Error(
                 'refund_failed',
-                __( 'Breeze refund API request failed. Check the debug log for details, or process the refund from the Breeze dashboard.', 'breeze-payment-gateway' )
+                __( 'Breeze refund request failed. If the customer paid with crypto, refunds must be processed manually from the Breeze dashboard (requires customer wallet address). For card payments, check the debug log for details.', 'breeze-payment-gateway' )
             );
         }
 
