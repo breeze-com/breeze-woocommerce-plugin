@@ -24,20 +24,27 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
 
     /**
      * Breeze API Base URL
-     *
-     * Override via constant:  define( 'BREEZE_API_BASE_URL', 'https://api.qa.breeze.cash' );
-     * Override via filter:    add_filter( 'breeze_api_base_url', fn() => 'https://api.qa.breeze.cash' );
-     *
      * @var string
      */
     private $api_base_url;
 
-    /**
-     * Logger instance
-     *
-     * @var WC_Logger|null
-     */
+    /** @var WC_Logger|null */
     private $log = null;
+
+    /** @var bool */
+    protected $testmode = false;
+
+    /** @var string */
+    protected $api_key = '';
+
+    /** @var string */
+    protected $webhook_secret = '';
+
+    /** @var bool */
+    protected $debug = false;
+
+    /** @var array */
+    protected $payment_methods = array();
 
     /**
      * Constructor for the gateway.

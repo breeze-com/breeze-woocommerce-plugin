@@ -133,11 +133,14 @@ final class WC_Breeze_Blocks_Support extends AbstractPaymentMethodType {
     }
 }
 
-// Enqueue styles
-wp_register_style(
-    'wc-breeze-blocks',
-    BREEZE_PAYMENT_GATEWAY_PLUGIN_URL . 'assets/css/breeze-blocks.css',
-    array(),
-    BREEZE_PAYMENT_GATEWAY_VERSION
-);
-wp_enqueue_style( 'wc-breeze-blocks' );
+// Enqueue styles only on checkout pages (not globally)
+add_action( 'wp_enqueue_scripts', function() {
+    if ( function_exists( 'is_checkout' ) && is_checkout() ) {
+        wp_enqueue_style(
+            'wc-breeze-blocks',
+            BREEZE_PAYMENT_GATEWAY_PLUGIN_URL . 'assets/css/breeze-blocks.css',
+            array(),
+            BREEZE_PAYMENT_GATEWAY_VERSION
+        );
+    }
+} );
