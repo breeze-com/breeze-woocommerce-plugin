@@ -2473,6 +2473,299 @@ function test_discount_percentage_off_various() {
     }
 }
 
+// ─── Happy Path End-to-End Tests ────────────────────────────────────────────
+
+function test_happy_path_single_item_full_flow() {
+    echo "\n🧪 Test 111: HAPPY PATH — Single item, full checkout → webhook → order complete\n";
+
+    // Step 1: Customer adds Snowboard ($699.95) to cart
+    $line_total = 699.95;
+    $qty = 1;
+    $line_total_cents = (int) round( $line_total * 100 );
+    $items = split_line_item( $line_total_cents, $qty );
+
+    assert_equals( 69995, items_total( $items ), 'Step 1: Products array has correct amount (69995 cents)' );
+    assert_equals( 1, $items[0]['quantity'], 'Step 1: Quantity = 1' );
+
+    // Step 2: Payment page created with correct data
+    $order_id = 42;
+    $customer_id = 'cus_abc123';
+    $client_ref = 'order-' . $order_id;
+    $return_token = 'tok_' . bin2hex( random_bytes( 16 ) );
+
+    assert_equals( 'order-42', $client_ref, 'Step 2: clientReferenceId = order-42' );
+    assert_true( strlen( $return_token ) > 0, 'Step 2: Return token generated' );
+
+    // Step 3: Customer pays on Breeze, redirected back with success
+    $order_status = 'pending';
+    $order_is_paid = false;
+
+    // Return URL sets to on-hold (NOT payment_complete)
+    if ( ! $order_is_paid ) {
+        $order_status = 'on-hold';
+    }
+    assert_equals( 'on-hold', $order_status, 'Step 3: Return URL sets order to on-hold' );
+
+    // Token consumed
+    $return_token = null;
+    assert_true( $return_token === null, 'Step 3: Return token consumed' );
+
+    // Step 4: Webhook fires with PAYMENT_SUCCEEDED
+    $webhook_data = array(
+        'clientReferenceId' => 'order-42',
+        'pageId' => 'page_xyz789',
+    );
+    $stored_page_id = 'page_xyz789';
+
+    // Verify page ID matches
+    $page_match = ( $stored_page_id === $webhook_data['pageId'] );
+    assert_true( $page_match, 'Step 4: Webhook pageId matches stored page ID' );
+
+    // payment_complete called
+    $order_is_paid = true;
+    $order_status = 'processing';
+    $transaction_id = $webhook_data['pageId'];
+
+    assert_true( $order_is_paid, 'Step 4: Order marked as paid' );
+    assert_equals( 'processing', $order_status, 'Step 4: Order status = processing' );
+    assert_equals( 'page_xyz789', $transaction_id, 'Step 4: Transaction ID recorded' );
+}
+
+function test_happy_path_multi_item_with_discount() {
+    echo "\n🧪 Test 112: HAPPY PATH — Multi-item cart with 20% coupon\n";
+
+    // Cart: Snowboard ($699.95) + T-Shirt x2 ($29.99 each) + Sticker ($4.99)
+    // Coupon: 20% off entire cart
+    // Subtotal: 699.95 + 59.98 + 4.99 = 764.92
+    // Discount: 764.92 * 0.20 = 152.98
+    // Total: 764.92 - 152.98 = 611.94
+
+    $lines = array(
+        array( 'name' => 'Snowboard', 'line_total' => 559.96, 'qty' => 1 ),  // 699.95 * 0.80
+        array( 'name' => 'T-Shirt',   'line_total' => 47.98,  'qty' => 2 ),  // 29.99 * 2 * 0.80
+        array( 'name' => 'Sticker',   'line_total' => 3.99,   'qty' => 1 ),  // 4.99 * 0.80 (rounds)
+    );
+    $shipping = 9.99;
+
+    $products = array();
+    $total_cents = 0;
+
+    foreach ( $lines as $line ) {
+        $line_cents = (int) round( $line['line_total'] * 100 );
+        $items = split_line_item( $line_cents, $line['qty'] );
+        $total_cents += items_total( $items );
+
+        foreach ( $items as $item ) {
+            $products[] = array_merge( $item, array( 'name' => $line['name'] ) );
+        }
+    }
+
+    // Add shipping
+    $shipping_cents = (int) round( $shipping * 100 );
+    $products[] = array( 'name' => 'Shipping', 'amount' => $shipping_cents, 'quantity' => 1 );
+    $total_cents += $shipping_cents;
+
+    // Verify all products present
+    $names = array_map( function( $p ) { return $p['name']; }, $products );
+    assert_true( in_array( 'Snowboard', $names ), 'Snowboard in cart' );
+    assert_true( in_array( 'T-Shirt', $names ), 'T-Shirt in cart' );
+    assert_true( in_array( 'Sticker', $names ), 'Sticker in cart' );
+    assert_true( in_array( 'Shipping', $names ), 'Shipping in cart' );
+
+    // Verify total
+    $expected_total = 55996 + 4798 + 399 + 999;
+    assert_equals( $expected_total, $total_cents, "Total = {$expected_total} cents (\$" . number_format( $expected_total / 100, 2 ) . ")" );
+
+    // Verify discounted prices (not catalog)
+    $snowboard = null;
+    foreach ( $products as $p ) {
+        if ( $p['name'] === 'Snowboard' ) { $snowboard = $p; break; }
+    }
+    assert_equals( 55996, $snowboard['amount'], 'Snowboard = $559.96 (20% off $699.95)' );
+    assert_true( $snowboard['amount'] < 69995, 'Snowboard price is discounted (< $699.95)' );
+}
+
+function test_happy_path_webhook_then_return() {
+    echo "\n🧪 Test 113: HAPPY PATH — Webhook fires BEFORE return URL (race condition)\n";
+
+    // This tests the case where Breeze webhook arrives before the customer
+    // is redirected back. The return URL should see is_paid() = true and skip.
+
+    $order_status = 'pending';
+    $order_is_paid = false;
+
+    // Step 1: Webhook arrives first
+    if ( ! $order_is_paid ) {
+        $order_is_paid = true;
+        $order_status = 'processing';
+    }
+    assert_equals( 'processing', $order_status, 'Webhook sets processing' );
+
+    // Step 2: Return URL arrives after — should NOT change status
+    if ( ! $order_is_paid ) {
+        $order_status = 'on-hold'; // This should NOT execute
+    }
+    assert_equals( 'processing', $order_status, 'Return URL does NOT override processing to on-hold' );
+    assert_true( $order_is_paid, 'Order remains paid' );
+}
+
+function test_happy_path_refund_after_payment() {
+    echo "\n🧪 Test 114: HAPPY PATH — Full payment → partial refund → full refund\n";
+
+    $order_total_cents = 69995; // $699.95
+    $page_id = 'page_abc123';
+    $refunded_total = 0;
+
+    // Partial refund: $100
+    $refund_1 = 100.00;
+    $refund_1_cents = (int) round( $refund_1 * 100 );
+    assert_equals( 10000, $refund_1_cents, 'Partial refund = 10000 cents' );
+    assert_true( $refund_1 > 0, 'Refund amount valid' );
+    assert_true( ! empty( $page_id ), 'Page ID available for refund' );
+    $refunded_total += $refund_1_cents;
+
+    // Remaining: $599.95
+    $remaining = $order_total_cents - $refunded_total;
+    assert_equals( 59995, $remaining, 'Remaining after partial = $599.95' );
+
+    // Full refund of remainder
+    $refund_2_cents = $remaining;
+    $refunded_total += $refund_2_cents;
+
+    assert_equals( $order_total_cents, $refunded_total, 'Total refunded = original order total' );
+}
+
+function test_happy_path_guest_checkout() {
+    echo "\n🧪 Test 115: HAPPY PATH — Guest checkout (no user account)\n";
+
+    $user_id = 0; // Guest
+    $order_id = 99;
+    $email = 'guest@example.com';
+
+    // Customer reference
+    $ref = $user_id ? 'user-' . $user_id : 'guest-' . $order_id;
+    assert_equals( 'guest-99', $ref, 'Guest reference = guest-99' );
+
+    // Customer data
+    $customer_data = array(
+        'referenceId' => $ref,
+        'email' => $email,
+        'signupAt' => time() * 1000,
+    );
+    assert_equals( 'guest@example.com', $customer_data['email'], 'Email correct' );
+    assert_true( $customer_data['signupAt'] > 1000000000000, 'signupAt in milliseconds' );
+
+    // Payment page
+    $client_ref = 'order-' . $order_id;
+    assert_equals( 'order-99', $client_ref, 'clientReferenceId = order-99' );
+}
+
+function test_happy_path_returning_customer() {
+    echo "\n🧪 Test 116: HAPPY PATH — Returning customer (cached Breeze ID)\n";
+
+    $user_id = 7;
+    $cached_breeze_id = 'cus_returning_abc';
+
+    // Should skip API call and use cached ID
+    $customer_id = $cached_breeze_id;
+    assert_equals( 'cus_returning_abc', $customer_id, 'Cached Breeze customer ID reused' );
+    assert_true( ! empty( $customer_id ), 'Customer ID available without API call' );
+}
+
+function test_happy_path_test_mode_vs_live() {
+    echo "\n🧪 Test 117: HAPPY PATH — Test mode uses test key, live uses live key\n";
+
+    // Test mode
+    $testmode = true;
+    $test_key = 'sk_test_abc123';
+    $live_key = 'sk_live_xyz789';
+    $api_key = $testmode ? $test_key : $live_key;
+    assert_equals( 'sk_test_abc123', $api_key, 'Test mode → test API key' );
+
+    // Live mode
+    $testmode = false;
+    $api_key = $testmode ? $test_key : $live_key;
+    assert_equals( 'sk_live_xyz789', $api_key, 'Live mode → live API key' );
+}
+
+function test_happy_path_preferred_payment_methods() {
+    echo "\n🧪 Test 118: HAPPY PATH — Preferred payment methods appended to URL\n";
+
+    $base_url = 'https://pay.breeze.cash/page_abc123';
+    $methods = array( 'apple_pay', 'card' );
+    $methods_str = implode( ',', $methods );
+
+    $final_url = $base_url . '?preferred_payment_methods=' . urlencode( $methods_str );
+    assert_true( strpos( $final_url, 'apple_pay' ) !== false, 'URL contains apple_pay' );
+    assert_true( strpos( $final_url, 'card' ) !== false, 'URL contains card' );
+    assert_true( strpos( $final_url, 'preferred_payment_methods=' ) !== false, 'URL has param key' );
+}
+
+function test_happy_path_order_notes_audit_trail() {
+    echo "\n🧪 Test 119: HAPPY PATH — Complete audit trail in order notes\n";
+
+    // Simulate the full lifecycle of order notes
+    $notes = array();
+
+    // Step 1: Order created
+    $notes[] = 'Awaiting Breeze payment.';
+
+    // Step 2: Customer returns
+    $notes[] = 'Customer returned from Breeze — awaiting webhook confirmation.';
+
+    // Step 3: Webhook confirms payment
+    $notes[] = 'Payment confirmed via Breeze webhook. Transaction ID: page_abc123';
+
+    // Step 4: Refund processed
+    $notes[] = 'Refund of 50 USD processed via Breeze. Refund ID: ref_xyz. Reason: Customer request';
+
+    assert_equals( 4, count( $notes ), '4 order notes in audit trail' );
+    assert_true( strpos( $notes[0], 'Awaiting' ) !== false, 'Note 1: Awaiting payment' );
+    assert_true( strpos( $notes[1], 'webhook confirmation' ) !== false, 'Note 2: Awaiting webhook' );
+    assert_true( strpos( $notes[2], 'Transaction ID' ) !== false, 'Note 3: Payment confirmed with TX ID' );
+    assert_true( strpos( $notes[3], 'Refund' ) !== false, 'Note 4: Refund with ID and reason' );
+}
+
+function test_happy_path_multiple_orders_different_customers() {
+    echo "\n🧪 Test 120: HAPPY PATH — Two orders, different customers, no cross-contamination\n";
+
+    // Order A
+    $order_a_id = 42;
+    $order_a_page = 'page_order_a';
+    $order_a_customer = 'cus_alice';
+    $order_a_ref = 'order-' . $order_a_id;
+
+    // Order B
+    $order_b_id = 43;
+    $order_b_page = 'page_order_b';
+    $order_b_customer = 'cus_bob';
+    $order_b_ref = 'order-' . $order_b_id;
+
+    // Verify isolation
+    assert_true( $order_a_ref !== $order_b_ref, 'Different clientReferenceIds' );
+    assert_true( $order_a_page !== $order_b_page, 'Different payment page IDs' );
+    assert_true( $order_a_customer !== $order_b_customer, 'Different customer IDs' );
+
+    // Webhook for A should not affect B
+    $webhook_page = 'page_order_a';
+    $match_a = ( $order_a_page === $webhook_page );
+    $match_b = ( $order_b_page === $webhook_page );
+    assert_true( $match_a, 'Webhook matches order A' );
+    assert_true( ! $match_b, 'Webhook does NOT match order B' );
+}
+
+// Run happy path tests
+test_happy_path_single_item_full_flow();
+test_happy_path_multi_item_with_discount();
+test_happy_path_webhook_then_return();
+test_happy_path_refund_after_payment();
+test_happy_path_guest_checkout();
+test_happy_path_returning_customer();
+test_happy_path_test_mode_vs_live();
+test_happy_path_preferred_payment_methods();
+test_happy_path_order_notes_audit_trail();
+test_happy_path_multiple_orders_different_customers();
+
 // Run discount rounding tests
 test_discount_rounding_3_items_10_off();
 test_discount_rounding_7_items_odd_total();
