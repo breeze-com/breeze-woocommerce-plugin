@@ -371,21 +371,69 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 continue;
             }
 
-            // Use the line item total (which reflects applied coupons/discounts)
-            // divided by quantity to get the effective per-unit price.
-            // This is more accurate than using catalog price + distributing discounts separately.
+            // Use the line item total (post-coupon) to calculate per-unit price.
+            // Handle rounding carefully: for qty > 1, the naive approach of
+            // round(total/qty) * qty may not equal the actual line total.
+            //
+            // Strategy: If qty == 1, use the exact line total in cents.
+            // If qty > 1, split into (qty-1) units at floor(total_cents/qty)
+            // and 1 unit absorbing the remainder. This guarantees the sum
+            // equals the exact line total. We emit qty-1 at the base price
+            // and 1 at base+remainder.
             $qty = $item->get_quantity();
-            $unit_price_cents = $qty > 0
-                ? (int) round( ( $item->get_total() / $qty ) * 100 )
-                : (int) round( $product->get_price() * 100 );
 
-            $product_item = array(
-                'name'        => $item->get_name(),
-                'description' => $product->get_short_description() ? $product->get_short_description() : $item->get_name(),
-                'currency'    => $order->get_currency(),
-                'amount'      => $unit_price_cents,
-                'quantity'    => $qty,
-            );
+            if ( $qty <= 0 ) {
+                continue; // Skip zero/negative quantity items
+            }
+
+            $line_total_cents = (int) round( $item->get_total() * 100 );
+            $base_unit_cents  = (int) floor( $line_total_cents / $qty );
+            $remainder_cents  = $line_total_cents - ( $base_unit_cents * $qty );
+
+            $description = $product->get_short_description() ? $product->get_short_description() : $item->get_name();
+
+            // If no remainder, emit a single product entry for the full quantity.
+            // If there IS a remainder, split: (qty-1) at base price + 1 at base+remainder.
+            // This keeps the Breeze payment page total exactly matching WooCommerce.
+            if ( $remainder_cents === 0 ) {
+                $product_item = array(
+                    'name'        => $item->get_name(),
+                    'description' => $description,
+                    'currency'    => $order->get_currency(),
+                    'amount'      => $base_unit_cents,
+                    'quantity'    => $qty,
+                );
+            } else {
+                // Emit the bulk at base price
+                if ( $qty > 1 ) {
+                    $bulk_item = array(
+                        'name'        => $item->get_name(),
+                        'description' => $description,
+                        'currency'    => $order->get_currency(),
+                        'amount'      => $base_unit_cents,
+                        'quantity'    => $qty - 1,
+                    );
+
+                    $image_url = wp_get_attachment_url( $product->get_image_id() );
+                    if ( $image_url ) {
+                        $bulk_item['images'] = array( $image_url );
+                    }
+                    if ( $product->get_id() ) {
+                        $bulk_item['id'] = (string) $product->get_id();
+                    }
+
+                    $products[] = $bulk_item;
+                }
+
+                // Emit 1 unit absorbing the remainder
+                $product_item = array(
+                    'name'        => $item->get_name(),
+                    'description' => $description,
+                    'currency'    => $order->get_currency(),
+                    'amount'      => $base_unit_cents + $remainder_cents,
+                    'quantity'    => 1,
+                );
+            }
 
             // Add image if available
             $image_url = wp_get_attachment_url( $product->get_image_id() );

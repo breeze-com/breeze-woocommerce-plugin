@@ -2238,6 +2238,255 @@ test_full_refund();
 test_webhook_cross_order_attack();
 test_multisite_woocommerce_detection();
 
+// ─── Discount Rounding Edge Case Tests ──────────────────────────────────────
+
+// Helper: simulate the new rounding-safe product split logic
+function split_line_item( $line_total_cents, $qty ) {
+    $base = (int) floor( $line_total_cents / $qty );
+    $remainder = $line_total_cents - ( $base * $qty );
+
+    $items = array();
+    if ( $remainder === 0 ) {
+        $items[] = array( 'amount' => $base, 'quantity' => $qty );
+    } else {
+        if ( $qty > 1 ) {
+            $items[] = array( 'amount' => $base, 'quantity' => $qty - 1 );
+        }
+        $items[] = array( 'amount' => $base + $remainder, 'quantity' => 1 );
+    }
+    return $items;
+}
+
+function items_total( $items ) {
+    $sum = 0;
+    foreach ( $items as $i ) {
+        $sum += $i['amount'] * $i['quantity'];
+    }
+    return $sum;
+}
+
+function test_discount_rounding_3_items_10_off() {
+    echo "\n🧪 Test 99: Rounding — 3 × \$33.33, \$10 cart discount → exact cents\n";
+
+    // Line total after discount: 3 × 33.33 - 10 = 89.99
+    $line_total_cents = 8999;
+    $qty = 3;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 8999, $sum, 'Sum of split items = 8999 cents (exact line total)' );
+
+    // Verify the split: floor(8999/3) = 2999, remainder = 8999 - 2999*3 = 2
+    assert_equals( 2999, $items[0]['amount'], 'Bulk unit price = 2999 cents' );
+    assert_equals( 2, $items[0]['quantity'], 'Bulk quantity = 2' );
+    assert_equals( 3001, $items[1]['amount'], 'Remainder unit price = 3001 cents' );
+    assert_equals( 1, $items[1]['quantity'], 'Remainder quantity = 1' );
+}
+
+function test_discount_rounding_7_items_odd_total() {
+    echo "\n🧪 Test 100: Rounding — 7 items, \$100 total → exact cents\n";
+
+    $line_total_cents = 10000;
+    $qty = 7;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 10000, $sum, 'Sum = 10000 cents (exact)' );
+    // floor(10000/7) = 1428, remainder = 10000 - 1428*7 = 4
+    assert_equals( 1428, $items[0]['amount'], 'Bulk = 1428 cents' );
+    assert_equals( 6, $items[0]['quantity'], 'Bulk qty = 6' );
+    assert_equals( 1432, $items[1]['amount'], 'Remainder = 1432 cents' );
+}
+
+function test_discount_even_split_no_remainder() {
+    echo "\n🧪 Test 101: Even split — 4 × \$25.00 = \$100.00, no remainder\n";
+
+    $line_total_cents = 10000;
+    $qty = 4;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 10000, $sum, 'Sum = 10000 cents' );
+    assert_equals( 1, count( $items ), 'Single entry (no split needed)' );
+    assert_equals( 2500, $items[0]['amount'], 'Unit price = 2500 cents' );
+    assert_equals( 4, $items[0]['quantity'], 'Quantity = 4' );
+}
+
+function test_discount_single_item_no_split() {
+    echo "\n🧪 Test 102: Single item — no split regardless of amount\n";
+
+    $line_total_cents = 4999;
+    $qty = 1;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 4999, $sum, 'Sum = 4999 cents' );
+    assert_equals( 1, count( $items ), 'Single entry' );
+    assert_equals( 4999, $items[0]['amount'], 'Amount = 4999 cents' );
+    assert_equals( 1, $items[0]['quantity'], 'Quantity = 1' );
+}
+
+function test_discount_penny_remainder() {
+    echo "\n🧪 Test 103: \$5 discount on 3 items (\$10 each) → 1 cent remainder\n";
+
+    // 3 × $10 - $5 = $25.00. Per line item: $25 / 3 = $8.333...
+    // Actual line total = 2500 cents. floor(2500/3) = 833. 833*3 = 2499. Remainder = 1.
+    $line_total_cents = 2500;
+    $qty = 3;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 2500, $sum, 'Sum = 2500 cents (exact)' );
+    assert_equals( 833, $items[0]['amount'], 'Bulk = 833 cents' );
+    assert_equals( 2, $items[0]['quantity'], 'Bulk qty = 2' );
+    assert_equals( 834, $items[1]['amount'], 'Remainder = 834 cents' );
+}
+
+function test_discount_free_item_split() {
+    echo "\n🧪 Test 104: 100% discount (free) — 0 cents, no remainder\n";
+
+    $line_total_cents = 0;
+    $qty = 3;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 0, $sum, 'Sum = 0 cents' );
+    assert_equals( 1, count( $items ), 'Single entry (0 / 3 = 0, no remainder)' );
+    assert_equals( 0, $items[0]['amount'], 'Amount = 0' );
+    assert_equals( 3, $items[0]['quantity'], 'Quantity = 3' );
+}
+
+function test_discount_large_qty_remainder() {
+    echo "\n🧪 Test 105: 100 items, \$333.33 total → large remainder\n";
+
+    $line_total_cents = 33333;
+    $qty = 100;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 33333, $sum, 'Sum = 33333 cents (exact)' );
+    // floor(33333/100) = 333, remainder = 33333 - 333*100 = 33
+    assert_equals( 333, $items[0]['amount'], 'Bulk = 333 cents' );
+    assert_equals( 99, $items[0]['quantity'], 'Bulk qty = 99' );
+    assert_equals( 366, $items[1]['amount'], 'Remainder unit = 366 cents (333 + 33)' );
+}
+
+function test_discount_two_items_odd_cent() {
+    echo "\n🧪 Test 106: 2 items, \$19.99 total → 1 cent remainder\n";
+
+    $line_total_cents = 1999;
+    $qty = 2;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 1999, $sum, 'Sum = 1999 cents' );
+    assert_equals( 999, $items[0]['amount'], 'Bulk = 999 cents' );
+    assert_equals( 1, $items[0]['quantity'], 'Bulk qty = 1' );
+    assert_equals( 1000, $items[1]['amount'], 'Remainder = 1000 cents' );
+}
+
+function test_discount_multi_line_items_total_matches_order() {
+    echo "\n🧪 Test 107: Multi-line order — sum of all splits matches order total\n";
+
+    // Simulate: Snowboard ($559.96 after 20% off), T-Shirt x2 ($47.98 after 20%), Sticker ($3.99 after 20%)
+    // + $9.99 shipping
+    $lines = array(
+        array( 'total_cents' => 55996, 'qty' => 1 ),  // Snowboard
+        array( 'total_cents' => 4798, 'qty' => 2 ),   // T-Shirt x2
+        array( 'total_cents' => 399, 'qty' => 1 ),    // Sticker
+    );
+    $shipping_cents = 999;
+
+    $grand_total = 0;
+    foreach ( $lines as $line ) {
+        $items = split_line_item( $line['total_cents'], $line['qty'] );
+        $grand_total += items_total( $items );
+    }
+    $grand_total += $shipping_cents;
+
+    $expected = 55996 + 4798 + 399 + 999;
+    assert_equals( $expected, $grand_total, "Grand total = {$expected} cents (all line totals + shipping)" );
+}
+
+function test_discount_worst_case_rounding() {
+    echo "\n🧪 Test 108: Worst case — \$0.01 total across 99 items\n";
+
+    $line_total_cents = 1;
+    $qty = 99;
+
+    $items = split_line_item( $line_total_cents, $qty );
+    $sum = items_total( $items );
+
+    assert_equals( 1, $sum, 'Sum = 1 cent (exact)' );
+    // floor(1/99) = 0, remainder = 1
+    assert_equals( 0, $items[0]['amount'], 'Bulk = 0 cents (98 free items)' );
+    assert_equals( 98, $items[0]['quantity'], 'Bulk qty = 98' );
+    assert_equals( 1, $items[1]['amount'], 'Remainder = 1 cent' );
+}
+
+function test_discount_naive_vs_split_comparison() {
+    echo "\n🧪 Test 109: Naive round() vs split — proves split is exact\n";
+
+    // Case where naive rounding fails: $89.99 / 3 = 29.9966... → round to 3000 → 3000*3 = 9000 ≠ 8999
+    $line_total = 89.99;
+    $qty = 3;
+    $line_total_cents = (int) round( $line_total * 100 );
+
+    // Naive approach (what the old code did)
+    $naive_unit = (int) round( ( $line_total / $qty ) * 100 );
+    $naive_total = $naive_unit * $qty;
+
+    // Split approach (new code)
+    $items = split_line_item( $line_total_cents, $qty );
+    $split_total = items_total( $items );
+
+    assert_true( $naive_total !== $line_total_cents, "Naive rounding LOSES cents: {$naive_total} ≠ {$line_total_cents}" );
+    assert_equals( $line_total_cents, $split_total, "Split approach is EXACT: {$split_total} = {$line_total_cents}" );
+}
+
+function test_discount_percentage_off_various() {
+    echo "\n🧪 Test 110: Various percentage discounts — all exact\n";
+
+    $cases = array(
+        array( 'desc' => '10% off $99.99 × 3', 'total' => 269.97, 'disc' => 0.10, 'qty' => 3 ),
+        array( 'desc' => '15% off $19.99 × 7', 'total' => 139.93, 'disc' => 0.15, 'qty' => 7 ),
+        array( 'desc' => '33% off $49.95 × 2', 'total' => 99.90, 'disc' => 0.33, 'qty' => 2 ),
+        array( 'desc' => '50% off $9.99 × 5', 'total' => 49.95, 'disc' => 0.50, 'qty' => 5 ),
+    );
+
+    foreach ( $cases as $c ) {
+        $discounted_total = round( $c['total'] * ( 1 - $c['disc'] ), 2 );
+        $line_total_cents = (int) round( $discounted_total * 100 );
+
+        $items = split_line_item( $line_total_cents, $c['qty'] );
+        $sum = items_total( $items );
+
+        assert_equals( $line_total_cents, $sum, "{$c['desc']} → {$line_total_cents} cents exact" );
+    }
+}
+
+// Run discount rounding tests
+test_discount_rounding_3_items_10_off();
+test_discount_rounding_7_items_odd_total();
+test_discount_even_split_no_remainder();
+test_discount_single_item_no_split();
+test_discount_penny_remainder();
+test_discount_free_item_split();
+test_discount_large_qty_remainder();
+test_discount_two_items_odd_cent();
+test_discount_multi_line_items_total_matches_order();
+test_discount_worst_case_rounding();
+test_discount_naive_vs_split_comparison();
+test_discount_percentage_off_various();
+
 echo "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
 echo "  {$passed} passed, {$failed} failed\n";
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
