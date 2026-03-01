@@ -364,13 +364,20 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 continue;
             }
 
-            // Add product to array (no API call needed)
+            // Use the line item total (which reflects applied coupons/discounts)
+            // divided by quantity to get the effective per-unit price.
+            // This is more accurate than using catalog price + distributing discounts separately.
+            $qty = $item->get_quantity();
+            $unit_price_cents = $qty > 0
+                ? (int) round( ( $item->get_total() / $qty ) * 100 )
+                : (int) round( $product->get_price() * 100 );
+
             $product_item = array(
                 'name'        => $item->get_name(),
                 'description' => $product->get_short_description() ? $product->get_short_description() : $item->get_name(),
                 'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $item->get_product()->get_price() * 100 ), // Amount in cents
-                'quantity'    => $item->get_quantity(),
+                'amount'      => $unit_price_cents,
+                'quantity'    => $qty,
             );
 
             // Add image if available
@@ -398,57 +405,13 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             );
         }
 
-        // Add tax as a product if present
-        if ( $order->get_total_tax() > 0 ) {
-            $products[] = array(
-                'name'        => __( 'Tax', 'breeze-payment-gateway' ),
-                'description' => __( 'Tax', 'breeze-payment-gateway' ),
-                'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $order->get_total_tax() * 100 ), // Amount in cents
-                'quantity'    => 1,
-            );
-        }
+        // NOTE: Do NOT send WooCommerce tax as a line item.
+        // Breeze is the Merchant of Record and calculates + collects tax itself.
+        // Sending WooCommerce tax would result in double-taxation for the customer.
 
-        // Distribute discounts proportionally across product items
-        // Breeze API does not accept negative amounts, so we reduce each product's
-        // unit price proportionally rather than adding a negative discount line item.
-        // This works for both fixed and percentage discounts.
-        $discount_total = $order->get_discount_total();
-        if ( $discount_total > 0 ) {
-            // Calculate subtotal of product items only (not shipping/tax)
-            $product_subtotal = 0;
-            foreach ( $products as $p ) {
-                if ( ! in_array( $p['name'], array( __( 'Shipping', 'breeze-payment-gateway' ), __( 'Tax', 'breeze-payment-gateway' ) ), true ) ) {
-                    $product_subtotal += $p['amount'] * $p['quantity'];
-                }
-            }
-
-            // Distribute discount proportionally across products
-            if ( $product_subtotal > 0 ) {
-                $discount_cents    = (int) round( $discount_total * 100 );
-                $allocated         = 0;
-                $last_product_idx  = -1;
-
-                foreach ( $products as $idx => &$p ) {
-                    if ( in_array( $p['name'], array( __( 'Shipping', 'breeze-payment-gateway' ), __( 'Tax', 'breeze-payment-gateway' ) ), true ) ) {
-                        continue;
-                    }
-                    $last_product_idx = $idx;
-
-                    $line_total     = $p['amount'] * $p['quantity'];
-                    $line_discount  = (int) round( ( $line_total / $product_subtotal ) * $discount_cents );
-                    $p['amount']    = (int) round( ( $line_total - $line_discount ) / $p['quantity'] );
-                    $allocated     += $line_discount;
-                }
-                unset( $p );
-
-                // Apply any rounding remainder to the last product item
-                $remainder = $discount_cents - $allocated;
-                if ( $remainder !== 0 && $last_product_idx >= 0 ) {
-                    $products[ $last_product_idx ]['amount'] -= $remainder;
-                }
-            }
-        }
+        // NOTE: Discounts are already reflected in the per-unit price above
+        // ($item->get_total() includes coupon/discount adjustments).
+        // No need to distribute discounts separately.
 
         return $products;
     }
@@ -639,20 +602,23 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
 
         if ( 'success' === $status ) {
             
-            // Mark as processing/completed
-            $order->payment_complete();
-            $order->add_order_note( __( 'Payment completed via Breeze.', 'breeze-payment-gateway' ) );
-            
-            // Reduce stock levels
-            wc_reduce_stock_levels( $order_id );
+            // Do NOT call payment_complete() here — the webhook is the authoritative
+            // confirmation of payment. Set to on-hold until the webhook fires.
+            // This prevents marking orders as paid if the customer is redirected back
+            // but the payment hasn't actually settled on Breeze's side.
+            if ( ! $order->is_paid() ) {
+                $order->update_status( 'on-hold', __( 'Customer returned from Breeze — awaiting webhook confirmation.', 'breeze-payment-gateway' ) );
+            }
 
             // Remove cart
-            WC()->cart->empty_cart();
+            if ( WC()->cart ) {
+                WC()->cart->empty_cart();
+            }
 
-            // Log success
+            // Log
             if ( $this->debug ) {
                 $this->log->info(
-                    sprintf( 'Payment completed for order #%s via return URL', $order_id ),
+                    sprintf( 'Customer returned from Breeze for order #%s — awaiting webhook', $order_id ),
                     array( 'source' => $this->id )
                 );
             }
