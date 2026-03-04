@@ -70,7 +70,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->method_title = __( 'Breeze', 'breeze-payment-gateway' );
         $this->method_description = sprintf(
             /* translators: %s: URL to Breeze sales page */
-            __( 'Accept payments through Breeze payment gateway. Customers will be redirected to Breeze to complete payment. Don\'t have a Breeze merchant account yet? <a href="%s" target="_blank">Contact our sales team</a> to get started.', 'breeze-payment-gateway' ),
+            __( 'Accept payments through Breeze payment gateway. Customers will be redirected to Breeze to complete payment. Don\'t have a Breeze merchant account yet? <a href="%s" target="_blank">Contact our sales team</a> to get started.<br><strong>Note:</strong> Breeze currently supports USD only. The gateway will be hidden automatically for other store currencies. To add support for additional currencies, use the <code>breeze_supported_currencies</code> filter.', 'breeze-payment-gateway' ),
             'https://breeze.com/sales'
         );
         
@@ -1021,17 +1021,31 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $stored_page_id  = $order->get_meta( '_breeze_payment_page_id' );
         $webhook_page_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
 
-        if ( $stored_page_id && $webhook_page_id && $stored_page_id !== $webhook_page_id ) {
-            if ( $this->debug ) {
-                $this->log->error(
-                    sprintf(
-                        'Webhook page ID mismatch for order #%d: stored=%s, webhook=%s',
-                        $order_id, $stored_page_id, $webhook_page_id
-                    ),
-                    array( 'source' => $this->id )
-                );
+        if ( $stored_page_id ) {
+            if ( ! $webhook_page_id ) {
+                // We have a stored pageId but the webhook omits it — reject.
+                // Accepting pageId-less webhooks would silently bypass cross-order protection.
+                if ( $this->debug ) {
+                    $this->log->warning(
+                        sprintf( 'Webhook missing pageId for order #%d (stored: %s)', $order_id, $stored_page_id ),
+                        array( 'source' => $this->id )
+                    );
+                }
+                return false;
             }
-            return false;
+
+            if ( $stored_page_id !== $webhook_page_id ) {
+                if ( $this->debug ) {
+                    $this->log->error(
+                        sprintf(
+                            'Webhook page ID mismatch for order #%d: stored=%s, webhook=%s',
+                            $order_id, $stored_page_id, $webhook_page_id
+                        ),
+                        array( 'source' => $this->id )
+                    );
+                }
+                return false;
+            }
         }
 
         return $order;

@@ -1,14 +1,23 @@
 # Breeze WooCommerce Plugin — QA Report
 
-**Date:** 2026-03-01  
-**Version:** 1.0.2  
-**Reviewer:** TARS (automated QA)
+**Date:** 2026-03-04
+**Version:** 1.0.2
+**Reviewer:** TARS (automated QA) + human review
+
+---
+
+## Revision History
+
+| Date | Changes |
+|------|---------|
+| 2026-03-01 | Initial report (v1.0.2, pre-PR #2) |
+| 2026-03-04 | Updated to reflect PR #2 fixes and subsequent follow-up patches |
 
 ---
 
 ## Summary
 
-The plugin is well-structured with good security fundamentals (return token, webhook signature verification, timing-safe comparison). Several issues need attention before production use.
+The plugin is well-structured with good security fundamentals (return token, webhook signature verification, timing-safe comparison). PR #2 resolved 13 of 16 original findings. Two additional issues were identified and patched during PR review. Three items remain open.
 
 ---
 
@@ -16,74 +25,74 @@ The plugin is well-structured with good security fundamentals (return token, web
 
 ### 🔴 Critical
 
-#### 1. `clientReferenceId` Parsing Allows Order ID Injection
-**File:** `class-wc-breeze-payment-gateway.php` L380, L404  
-The webhook extracts order IDs via `str_replace('order-', '', $data['clientReferenceId'])`. An attacker with a valid webhook signature could craft `clientReferenceId: 'order-order-99'` → parsed as `'order-99'` (benign), but more importantly: `'order-42'` is just `'42'` — a string, not an int. `wc_get_order('42')` works, but there's **no verification that the webhook's payment page ID matches the order's stored `_breeze_payment_page_id`**. If a legitimate payment for order A succeeds, and its webhook data is replayed (different Breeze payment but same structure), order B could be marked paid.
+#### 1. ~~`clientReferenceId` Parsing / Missing `pageId` Verification~~ ✅ Fixed (PR #2 + follow-up patch)
+**File:** `class-wc-breeze-payment-gateway.php`
+The webhook handler had no verification that the incoming `pageId` matched the `_breeze_payment_page_id` stored on the order, allowing a valid webhook for order A to mark order B as paid.
 
-**Mitigation:** Verify `$data['pageId']` matches `$order->get_meta('_breeze_payment_page_id')` before calling `payment_complete()`.
+PR #2 added `get_order_from_webhook()` with a pageId check, but the condition had a bypass bug:
+```php
+// Buggy — silently bypassed when webhook omits pageId
+if ( $stored_page_id && $webhook_page_id && $stored_page_id !== $webhook_page_id )
+```
+**Follow-up patch** corrected this to fail closed: if `$stored_page_id` is set but the webhook omits `pageId`, the webhook is now rejected.
 
-#### 2. Debug Logging Leaks Sensitive Data
-**File:** `class-wc-breeze-payment-gateway.php` L262-267  
-When debug is enabled, the full API request data is logged including `billingEmail` and the full webhook payload. The API request logs include the Authorization header indirectly (through the `$data` array passed to the logger context). The webhook verified log at L327 logs the entire `$webhook_data` including potentially sensitive customer data.
+#### 2. ~~Debug Logging Leaks Sensitive Data~~ ✅ Fixed (PR #2)
+**File:** `class-wc-breeze-payment-gateway.php`
+`billingEmail` and full customer objects are no longer logged. Webhook logs now include only event type and order reference.
 
-**Mitigation:** Redact PII from debug logs. Never log full webhook payloads in production.
+---
 
 ### 🟡 Medium
 
-#### 3. No Webhook Replay Protection
-**File:** `class-wc-breeze-payment-gateway.php` L300+  
-There's no timestamp validation or nonce/idempotency key on webhooks. While signature verification prevents forgery, a captured valid webhook could be replayed. The `is_paid()` check provides partial protection for success events, but failure webhooks have no replay guard — a replayed `payment.failed` could flip a paid order to failed.
+#### 3. No Webhook Replay Protection — ⚠️ Open (tracked)
+**File:** `class-wc-breeze-payment-gateway.php`
+There's no timestamp validation or idempotency key on webhooks. HMAC signature verification prevents forgery, and `is_paid()` prevents double-completion of success events. Failure webhooks now guard against overriding paid orders (Finding 4). The remaining risk is narrow (replay against a refunded order), but not yet fully addressed.
 
-**Mitigation:** Store processed webhook IDs (or use a timestamp window). For failure webhooks, check if order is already paid before setting to failed.
+**Mitigation:** Store processed webhook page IDs in order meta; reject duplicate `pageId` events. Tracked as a follow-up issue.
 
-#### 4. Failure Webhook Can Override Completed Payment
-**File:** `class-wc-breeze-payment-gateway.php` L404-414  
-`handle_payment_failed_webhook()` calls `update_status('failed')` without checking `$order->is_paid()`. If a delayed failure webhook arrives after a success webhook, it will override the completed order.
+#### 4. ~~Failure Webhook Can Override Completed Payment~~ ✅ Fixed (PR #2)
+`handle_payment_failed_webhook()` now checks `$order->is_paid()` and returns early if the order is already complete.
 
-**Mitigation:** Add `if ($order->is_paid()) return;` guard.
+#### 5. Race Condition: Stale Orders if Webhook Never Fires — ⚠️ Open
+**File:** `class-wc-breeze-payment-gateway.php`
+PR #2 correctly changed `handle_return()` to set orders to `on-hold` rather than calling `payment_complete()`, deferring authoritative confirmation to the webhook. However, if the webhook never arrives (misconfigured endpoint, network failure), the order stays `on-hold` indefinitely with no cleanup.
 
-#### 5. Race Condition: Webhook vs Return URL
-**File:** `class-wc-breeze-payment-gateway.php`  
-If the webhook fires before `handle_return()`, the return URL handler still works correctly (it checks `is_paid()` and skips the status change). However, if **both** fail (webhook doesn't fire, customer doesn't return), the order stays `pending` indefinitely with no cleanup mechanism.
+**Mitigation:** Add a `wp_cron` job to expire or flag stale `on-hold` Breeze orders after a configurable timeout (e.g., 24h). Tracked as a follow-up issue.
 
-**Mitigation:** Add a scheduled event (wp_cron) to expire stale pending Breeze orders after a configurable timeout (e.g., 24h).
+#### 6. No Rate Limiting on Return URL Endpoint — ⚠️ Open
+**File:** `class-wc-breeze-payment-gateway.php`
+The `handle_return` endpoint is publicly accessible. The one-time token prevents order manipulation, but probing is still possible. Low practical risk given the token requirement.
 
-#### 6. No Rate Limiting on Return URL Endpoint
-**File:** `class-wc-breeze-payment-gateway.php` L271+  
-The `handle_return` endpoint is publicly accessible. While the one-time token prevents order manipulation, an attacker can still probe order IDs and observe timing differences (valid vs. invalid orders). The token is consumed on first valid hit, so a second legitimate return would fail.
+**Mitigation:** Consider adding IP-based rate limiting or absorbing into server-level rules.
 
-**Mitigation:** Consider not consuming the token immediately, or redirect to a generic page regardless of token validity.
+#### 7. ~~WooCommerce Active Check Ignores Multisite~~ ✅ Fixed (PR #2)
+**File:** `breeze-payment-gateway.php`
+Now checks `get_site_option('active_sitewide_plugins')` for network-activated WooCommerce in multisite environments.
 
-#### 7. WooCommerce Active Check Ignores Multisite
-**File:** `breeze-payment-gateway.php` L35-37  
-The `active_plugins` check doesn't account for network-activated WooCommerce in multisite. Use `is_plugin_active()` or check `get_site_option('active_sitewide_plugins')` as well.
+---
 
 ### 🟢 Low
 
-#### 8. Blocks Support CSS/JS Enqueued Globally
-**File:** `class-wc-breeze-blocks-support.php` L107-112  
-`wp_enqueue_style('wc-breeze-blocks')` is called at file include time (outside a function/hook), meaning it runs on every page load, not just checkout. Minor performance issue.
+#### 8. ~~Blocks Support CSS Enqueued Globally~~ ✅ Fixed (PR #2 + follow-up patch)
+**File:** `class-wc-breeze-blocks-support.php`
+PR #2 moved the enqueue into a `wp_enqueue_scripts` action gated by `is_checkout()`. Follow-up patch also added `is_wc_endpoint_url('order-pay')` to cover the order-pay page.
 
-#### 9. `process_refund()` Declares Support But Returns Error
-**File:** `class-wc-breeze-payment-gateway.php` L82, L266  
-The gateway declares `'refunds'` in `$this->supports` but `process_refund()` always returns a WP_Error. This is misleading — the refund button will appear in admin but always fail.
+#### 9. ~~`process_refund()` Declares Support But Returns Error~~ ✅ Fixed (PR #2)
+Full refund implementation added via `POST /v1/payment_pages/{pageId}/refund`. Supports partial and full refunds with proper error messaging for crypto payments (which require manual handling).
 
-**Mitigation:** Either remove `'refunds'` from supports, or implement the API call.
+#### 10. ~~No Currency Validation~~ ✅ Fixed (PR #2 + follow-up patch)
+**File:** `class-wc-breeze-payment-gateway.php`
+`is_available()` now hides the gateway for unsupported currencies (default: USD). Extensible via the `breeze_supported_currencies` filter. Follow-up patch added a visible note in the gateway's admin description so merchants are aware of the USD-only default.
 
-#### 10. No Currency Validation
-**File:** `class-wc-breeze-payment-gateway.php`  
-The currency from `$order->get_currency()` is passed directly to Breeze without validating it's a currency Breeze supports. Non-supported currencies would fail at the API level with a potentially unhelpful error.
+#### 11. ~~Missing `absint()` on Webhook Order ID~~ ✅ Fixed (PR #2)
+`get_order_from_webhook()` now applies `absint()` to the extracted order ID, rejecting non-numeric references.
 
-**Mitigation:** Add `is_available()` override to check currency against supported list, or provide a better error message.
-
-#### 11. Missing `$order_id` Type Validation in Webhook
-**File:** `class-wc-breeze-payment-gateway.php` L383  
-`str_replace` returns a string, and `wc_get_order()` can accept strings, but no `absint()` is applied. A crafted `clientReferenceId` like `order-1 OR 1=1` would just return false from `wc_get_order()` (not SQL injectable since WC uses prepared statements), but it's still sloppy.
+---
 
 ### ℹ️ Info
 
 #### 12. API Key in Basic Auth
-The API key is sent as Basic auth (`base64_encode($this->api_key . ':')`) — standard pattern, but ensure HTTPS is enforced (it is, via `https://api.breeze.cash`).
+The API key is sent as Basic auth (`base64_encode($this->api_key . ':')`) — standard pattern, enforced over HTTPS.
 
 #### 13. HPOS Compatibility Declared
 Properly declares `custom_order_tables` compatibility via `FeaturesUtil`. Good.
@@ -101,17 +110,19 @@ Timing-safe comparison for HMAC verification. Good.
 
 ## Test Results
 
-All 46 existing tests pass. Tests cover core logic well but are pure unit simulations — no integration with actual WooCommerce classes.
+PR #2 expanded coverage from 46 to 120 tests (352 assertions), covering payment flow, webhook handlers, discount/tax calculations, security validations, and end-to-end lifecycle scenarios. All tests pass.
+
+**Gaps to address in future test iterations:**
+- `pageId`-absent webhook rejection (new behaviour from follow-up patch)
+- `order-pay` page CSS enqueue
+- Stale on-hold order behaviour (pending cron implementation)
 
 ---
 
-## Recommendations (Priority Order)
+## Open Items (Priority Order)
 
-1. **🔴 Verify payment page ID in webhook** before marking order paid
-2. **🔴 Redact PII from debug logs**
-3. **🟡 Guard failure webhook against overriding paid orders**
-4. **🟡 Add stale order cleanup cron**
-5. **🟡 Add webhook replay protection**
-6. **🟢 Remove `'refunds'` from supports or implement it**
-7. **🟢 Fix blocks CSS global enqueue**
-8. **🟢 Add currency validation**
+| # | Severity | Finding | Status |
+|---|----------|---------|--------|
+| 3 | 🟡 Medium | Webhook replay protection | Open — follow-up issue |
+| 5 | 🟡 Medium | Stale on-hold orders / no cron cleanup | Open — follow-up issue |
+| 6 | 🟡 Medium | No rate limiting on return URL | Open — low risk, defer |
