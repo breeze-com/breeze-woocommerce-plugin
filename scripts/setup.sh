@@ -15,9 +15,6 @@ wait_for_db
 cd "$WP_PATH"
 
 mkdir -p wp-content/uploads wp-content/upgrade wp-content/uploads/wc-logs
-# Only adjust ownership on writable dirs; plugin dir is a bind mount and can't be chowned.
-chown -R www-data:www-data wp-content/uploads wp-content/upgrade || true
-chmod -R 775 wp-content/uploads wp-content/upgrade
 
 if ! wp core is-installed --allow-root > /dev/null 2>&1; then
   wp core install \
@@ -32,6 +29,11 @@ fi
 
 wp plugin install woocommerce --activate --allow-root
 wp plugin activate breeze-payment-gateway --allow-root
+
+# Fix permissions after WooCommerce activation — WC creates wc-logs subdirectories
+# during activation (as root), so chown must run after, not before.
+chown -R www-data:www-data wp-content/uploads wp-content/upgrade || true
+chmod -R 775 wp-content/uploads wp-content/upgrade
 
 # Inject BREEZE_API_BASE_URL into wp-config.php if set in the environment
 if [ -n "${BREEZE_API_BASE_URL:-}" ]; then

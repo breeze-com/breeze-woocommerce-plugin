@@ -490,7 +490,12 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $payment_data = array(
             'products'          => $products,
             'billingEmail'      => $order->get_billing_email(),
-            'clientReferenceId' => 'order-' . $order->get_id(),
+            // Append a unique suffix so retries (same order, new payment attempt)
+            // don't collide with the previous payment page already in Breeze.
+            // The webhook handler uses absint() to extract the order ID, which
+            // stops at the first non-numeric character — so 'order-42-x7k2m9'
+            // is correctly resolved back to order 42.
+            'clientReferenceId' => 'order-' . $order->get_id() . '-' . wp_generate_password( 6, false, false ),
             'successReturnUrl'  => add_query_arg(
                 array(
                     'wc-api'   => 'breeze_return',
