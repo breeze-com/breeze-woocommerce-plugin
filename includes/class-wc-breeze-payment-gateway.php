@@ -32,7 +32,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     private $log = null;
 
     /** @var bool */
-    protected $testmode = false;
+    public $testmode = false;
 
     /** @var string */
     protected $api_key = '';
