@@ -209,48 +209,37 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Process the payment and return the result
+     * Process the payment and return the result.
+     *
+     * Uses the Breeze /v1/payment_pages (amount + currency) approach.
+     * No pre-creation of products or customers is required.
      *
      * @param int $order_id Order ID.
      * @return array
      */
     public function process_payment( $order_id ) {
-        
+
         $order = wc_get_order( $order_id );
 
         // Log payment attempt
         if ( $this->debug ) {
-            $this->log->debug( 
+            $this->log->debug(
                 sprintf( 'Processing payment for order #%s', $order_id ),
                 array( 'source' => $this->id )
             );
         }
 
         try {
-            
-            // Step 1: Create or get customer in Breeze
-            $customer_id = $this->get_or_create_breeze_customer( $order );
-            
-            if ( ! $customer_id ) {
-                throw new Exception( __( 'Failed to create customer in Breeze.', 'breeze-payment-gateway' ) );
-            }
 
-            // Step 2: Create products array for order items
-            $products = $this->create_breeze_products_array( $order );
-            
-            if ( empty( $products ) ) {
-                throw new Exception( __( 'Failed to create products array.', 'breeze-payment-gateway' ) );
-            }
+            // Create payment page directly via amount + currency.
+            // No separate customer or product API calls needed.
+            $payment_page = $this->create_breeze_payment_page( $order );
 
-            // Step 3: Create payment page
-            $payment_page = $this->create_breeze_payment_page( $order, $customer_id, $products );
-            
             if ( ! $payment_page || empty( $payment_page['url'] ) ) {
                 throw new Exception( __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
             }
 
-            // Store Breeze data in order meta
-            $order->update_meta_data( '_breeze_customer_id', $customer_id );
+            // Store Breeze payment page ID for webhook verification and refunds
             $order->update_meta_data( '_breeze_payment_page_id', $payment_page['id'] );
             $order->save();
 
@@ -272,9 +261,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             );
 
         } catch ( Exception $e ) {
-            
+
             wc_add_notice( __( 'Payment error: ', 'breeze-payment-gateway' ) . $e->getMessage(), 'error' );
-            
+
             // Log exception
             if ( $this->debug ) {
                 $this->log->error(
@@ -291,204 +280,39 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Get or create customer in Breeze
+     * Create a payment page in Breeze using the amount + currency approach.
+     *
+     * Sends the WooCommerce order total (which already incorporates all
+     * coupons, discounts, vouchers, and shipping) as a single `amount`
+     * field in the request body. This avoids any need to pre-create
+     * products or customers via separate API calls.
+     *
+     * Tax note: `$order->get_total()` includes WooCommerce-calculated tax.
+     * Because Breeze is the Merchant of Record, Breeze handles tax remittance
+     * on its side based on the charged amount — the customer pays exactly
+     * the WooCommerce order total and is not taxed twice.
+     *
+     * Discount note: all WooCommerce coupon and voucher discounts are already
+     * reflected in `get_total()`. No separate discount handling is required.
      *
      * @param WC_Order $order Order object.
-     * @return string|false Customer ID or false on failure.
-     */
-    private function get_or_create_breeze_customer( $order ) {
-        
-        // Check if customer already has Breeze ID from prior store Order
-        $user_id = $order->get_user_id();
-        
-        if ( $user_id ) {
-            $breeze_customer_id = get_user_meta( $user_id, '_breeze_customer_id', true );
-            
-            if ( $breeze_customer_id ) {
-                return $breeze_customer_id;
-            }
-        }
-
-        // Check if customer already has Breeze ID from another Merchant or Channel
-        $response = $this->breeze_api_request( 'GET', '/v1/customers?email=' . rawurlencode( $order->get_billing_email() ) );
-
-        if ( $response && isset( $response['data']['id'] ) ) {
-            $customer_id = $response['data']['id'];
-            
-            // Save to user meta if logged in
-            if ( $user_id ) {
-                update_user_meta( $user_id, '_breeze_customer_id', $customer_id );
-            }
-            
-            return $customer_id;
-        }
-        
-        // Create new customer
-        $customer_data = array(
-            'referenceId' => $user_id ? 'user-' . $user_id : 'guest-' . $order->get_id(),
-            'email'       => $order->get_billing_email(),
-            'signupAt'    => time() * 1000, // Convert to milliseconds
-        );
-
-        $response = $this->breeze_api_request( 'POST', '/v1/customers', $customer_data );
-
-        if ( $response && isset( $response['data']['id'] ) ) {
-            $customer_id = $response['data']['id'];
-            
-            // Save to user meta if logged in
-            if ( $user_id ) {
-                update_user_meta( $user_id, '_breeze_customer_id', $customer_id );
-            }
-            
-            return $customer_id;
-        }
-
-        return false;
-    }
-
-    /**
-     * Create line items for Breeze payment page
-     *
-     * @param WC_Order $order Order object.
-     * @return array Line items array.
-     */
-    /**
-     * Create products array for Breeze payment page
-     *
-     * @param WC_Order $order Order object.
-     * @return array Products array.
-     */
-    private function create_breeze_products_array( $order ) {
-        
-        $products = array();
-
-        // Get order items
-        foreach ( $order->get_items() as $item_id => $item ) {
-            
-            $product = $item->get_product();
-            
-            if ( ! $product ) {
-                continue;
-            }
-
-            // Use the line item total (post-coupon) to calculate per-unit price.
-            // Handle rounding carefully: for qty > 1, the naive approach of
-            // round(total/qty) * qty may not equal the actual line total.
-            //
-            // Strategy: If qty == 1, use the exact line total in cents.
-            // If qty > 1, split into (qty-1) units at floor(total_cents/qty)
-            // and 1 unit absorbing the remainder. This guarantees the sum
-            // equals the exact line total. We emit qty-1 at the base price
-            // and 1 at base+remainder.
-            $qty = $item->get_quantity();
-
-            if ( $qty <= 0 ) {
-                continue; // Skip zero/negative quantity items
-            }
-
-            $line_total_cents = (int) round( $item->get_total() * 100 );
-            $base_unit_cents  = (int) floor( $line_total_cents / $qty );
-            $remainder_cents  = $line_total_cents - ( $base_unit_cents * $qty );
-
-            $description = $product->get_short_description() ? $product->get_short_description() : $item->get_name();
-
-            // If no remainder, emit a single product entry for the full quantity.
-            // If there IS a remainder, split: (qty-1) at base price + 1 at base+remainder.
-            // This keeps the Breeze payment page total exactly matching WooCommerce.
-            if ( $remainder_cents === 0 ) {
-                $product_item = array(
-                    'name'        => $item->get_name(),
-                    'description' => $description,
-                    'currency'    => $order->get_currency(),
-                    'amount'      => $base_unit_cents,
-                    'quantity'    => $qty,
-                );
-            } else {
-                // Emit the bulk at base price
-                if ( $qty > 1 ) {
-                    $bulk_item = array(
-                        'name'        => $item->get_name(),
-                        'description' => $description,
-                        'currency'    => $order->get_currency(),
-                        'amount'      => $base_unit_cents,
-                        'quantity'    => $qty - 1,
-                    );
-
-                    $image_url = wp_get_attachment_url( $product->get_image_id() );
-                    if ( $image_url ) {
-                        $bulk_item['images'] = array( $image_url );
-                    }
-                    if ( $product->get_id() ) {
-                        $bulk_item['id'] = (string) $product->get_id();
-                    }
-
-                    $products[] = $bulk_item;
-                }
-
-                // Emit 1 unit absorbing the remainder
-                $product_item = array(
-                    'name'        => $item->get_name(),
-                    'description' => $description,
-                    'currency'    => $order->get_currency(),
-                    'amount'      => $base_unit_cents + $remainder_cents,
-                    'quantity'    => 1,
-                );
-            }
-
-            // Add image if available
-            $image_url = wp_get_attachment_url( $product->get_image_id() );
-            if ( $image_url ) {
-                $product_item['images'] = array( $image_url );
-            }
-
-            // Add optional ID from merchant's system
-            if ( $product->get_id() ) {
-                $product_item['id'] = (string) $product->get_id();
-            }
-
-            $products[] = $product_item;
-        }
-
-        // Add shipping as a product if present
-        if ( $order->get_shipping_total() > 0 ) {
-            $products[] = array(
-                'name'        => __( 'Shipping', 'breeze-payment-gateway' ),
-                'description' => $order->get_shipping_method(),
-                'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $order->get_shipping_total() * 100 ), // Amount in cents
-                'quantity'    => 1,
-            );
-        }
-
-        // NOTE: Do NOT send WooCommerce tax as a line item.
-        // Breeze is the Merchant of Record and calculates + collects tax itself.
-        // Sending WooCommerce tax would result in double-taxation for the customer.
-
-        // NOTE: Discounts are already reflected in the per-unit price above
-        // ($item->get_total() includes coupon/discount adjustments).
-        // No need to distribute discounts separately.
-
-        return $products;
-    }
-
-    /**
-     * Create payment page in Breeze
-     *
-     * @param WC_Order $order Order object.
-     * @param string $customer_id Breeze customer ID.
-     * @param array $products Products array.
      * @return array|false Payment page data or false on failure.
      */
-    private function create_breeze_payment_page( $order, $customer_id, $products ) {
+    private function create_breeze_payment_page( $order ) {
 
-        // Generate a one-time return token to prevent unauthenticated order status manipulation.
-        // The token is included in both return URLs and verified in handle_return().
+        // Generate a one-time return token to prevent unauthenticated order
+        // status manipulation. Verified in handle_return().
         $return_token = wp_generate_password( 32, false );
         $order->update_meta_data( '_breeze_return_token', $return_token );
         $order->save();
 
+        // Amount in minor units (cents). get_total() accounts for all
+        // coupons, discounts, vouchers, shipping, and WooCommerce tax.
+        $amount_cents = (int) round( $order->get_total() * 100 );
+
         $payment_data = array(
-            'products'          => $products,
+            'amount'            => $amount_cents,
+            'currency'          => $order->get_currency(),
             'billingEmail'      => $order->get_billing_email(),
             // Append a unique suffix so retries (same order, new payment attempt)
             // don't collide with the previous payment page already in Breeze.
@@ -514,25 +338,38 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 ),
                 home_url( '/' )
             ),
-            'customer'          => array(
-                'id' => $customer_id,
+            'description'       => sprintf(
+                /* translators: 1: order ID, 2: site name */
+                __( 'Order #%1$s from %2$s', 'breeze-payment-gateway' ),
+                $order->get_id(),
+                get_bloginfo( 'name' )
             ),
         );
+
+        // Log request (redact sensitive fields)
+        if ( $this->debug ) {
+            $safe_data = $payment_data;
+            unset( $safe_data['billingEmail'] );
+            $this->log->debug(
+                sprintf( 'Creating payment page for order #%s: amount=%d %s', $order->get_id(), $amount_cents, $order->get_currency() ),
+                array( 'source' => $this->id, 'data' => $safe_data )
+            );
+        }
 
         $response = $this->breeze_api_request( 'POST', '/v1/payment_pages', $payment_data );
 
         if ( $response && isset( $response['data'] ) ) {
-            $payment_data = $response['data'];
-            
+            $page_data = $response['data'];
+
             // Add preferred payment methods as query parameter if configured
             if ( ! empty( $this->payment_methods ) && is_array( $this->payment_methods ) ) {
                 $payment_methods_string = implode( ',', $this->payment_methods );
-                $payment_data['url'] = add_query_arg( 
-                    'preferred_payment_methods', 
-                    $payment_methods_string, 
-                    $payment_data['url'] 
+                $page_data['url'] = add_query_arg(
+                    'preferred_payment_methods',
+                    $payment_methods_string,
+                    $page_data['url']
                 );
-                
+
                 // Log payment methods being used
                 if ( $this->debug ) {
                     $this->log->debug(
@@ -541,8 +378,8 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                     );
                 }
             }
-            
-            return $payment_data;
+
+            return $page_data;
         }
 
         return false;
@@ -578,9 +415,6 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         if ( $this->debug ) {
             $safe_data = $data;
             unset( $safe_data['billingEmail'] );
-            if ( isset( $safe_data['customer'] ) ) {
-                $safe_data['customer'] = '[redacted]';
-            }
             $this->log->debug(
                 sprintf( 'Breeze API Request: %s %s', $method, $url ),
                 array( 'source' => $this->id, 'data' => $safe_data )
