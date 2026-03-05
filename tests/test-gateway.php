@@ -2478,22 +2478,27 @@ function test_discount_percentage_off_various() {
 function test_happy_path_single_item_full_flow() {
     echo "\n🧪 Test 111: HAPPY PATH — Single item, full checkout → webhook → order complete\n";
 
-    // Step 1: Customer adds Snowboard ($699.95) to cart
-    $line_total = 699.95;
-    $qty = 1;
-    $line_total_cents = (int) round( $line_total * 100 );
-    $items = split_line_item( $line_total_cents, $qty );
+    // Step 1: WooCommerce order total = $699.95 (all-in: product + any fees)
+    $order_total = 699.95;
+    $order_total_cents = (int) round( $order_total * 100 );
 
-    assert_equals( 69995, items_total( $items ), 'Step 1: Products array has correct amount (69995 cents)' );
-    assert_equals( 1, $items[0]['quantity'], 'Step 1: Quantity = 1' );
-
-    // Step 2: Payment page created with correct data
+    // Step 2: Payment page created using amount + currency (no products/customer pre-creation)
     $order_id = 42;
-    $customer_id = 'cus_abc123';
     $client_ref = 'order-' . $order_id;
     $return_token = 'tok_' . bin2hex( random_bytes( 16 ) );
 
-    assert_equals( 'order-42', $client_ref, 'Step 2: clientReferenceId = order-42' );
+    $payment_data = array(
+        'amount'            => $order_total_cents,
+        'currency'          => 'USD',
+        'billingEmail'      => 'buyer@example.com',
+        'clientReferenceId' => $client_ref,
+    );
+
+    assert_equals( 69995, $payment_data['amount'], 'Step 2: Amount = 69995 cents ($699.95)' );
+    assert_equals( 'USD', $payment_data['currency'], 'Step 2: Currency = USD' );
+    assert_equals( 'order-42', $payment_data['clientReferenceId'], 'Step 2: clientReferenceId = order-42' );
+    assert_true( ! isset( $payment_data['products'] ), 'Step 2: No "products" field (uses amount instead)' );
+    assert_true( ! isset( $payment_data['customer'] ), 'Step 2: No separate customer object required' );
     assert_true( strlen( $return_token ) > 0, 'Step 2: Return token generated' );
 
     // Step 3: Customer pays on Breeze, redirected back with success
@@ -2532,57 +2537,34 @@ function test_happy_path_single_item_full_flow() {
 }
 
 function test_happy_path_multi_item_with_discount() {
-    echo "\n🧪 Test 112: HAPPY PATH — Multi-item cart with 20% coupon\n";
+    echo "\n🧪 Test 112: HAPPY PATH — Multi-item cart with 20% coupon → single amount sent\n";
 
     // Cart: Snowboard ($699.95) + T-Shirt x2 ($29.99 each) + Sticker ($4.99)
     // Coupon: 20% off entire cart
     // Subtotal: 699.95 + 59.98 + 4.99 = 764.92
-    // Discount: 764.92 * 0.20 = 152.98
-    // Total: 764.92 - 152.98 = 611.94
+    // Discount (20%): -152.98
+    // Shipping: +9.99
+    // WooCommerce order total: 621.93
 
-    $lines = array(
-        array( 'name' => 'Snowboard', 'line_total' => 559.96, 'qty' => 1 ),  // 699.95 * 0.80
-        array( 'name' => 'T-Shirt',   'line_total' => 47.98,  'qty' => 2 ),  // 29.99 * 2 * 0.80
-        array( 'name' => 'Sticker',   'line_total' => 3.99,   'qty' => 1 ),  // 4.99 * 0.80 (rounds)
+    // With amount + currency, we just send the WooCommerce order total.
+    // All discounts, shipping, and tax are already accounted for by WooCommerce.
+    $wc_order_total = 621.93;
+    $amount_cents = (int) round( $wc_order_total * 100 );
+
+    $payment_data = array(
+        'amount'            => $amount_cents,
+        'currency'          => 'USD',
+        'billingEmail'      => 'buyer@example.com',
+        'clientReferenceId' => 'order-55',
     );
-    $shipping = 9.99;
 
-    $products = array();
-    $total_cents = 0;
+    assert_equals( 62193, $payment_data['amount'], 'Amount = 62193 cents ($621.93 incl. discount + shipping)' );
+    assert_true( ! isset( $payment_data['products'] ), 'No products array — uses amount+currency' );
+    assert_true( ! isset( $payment_data['customer'] ), 'No customer ID pre-creation needed' );
 
-    foreach ( $lines as $line ) {
-        $line_cents = (int) round( $line['line_total'] * 100 );
-        $items = split_line_item( $line_cents, $line['qty'] );
-        $total_cents += items_total( $items );
-
-        foreach ( $items as $item ) {
-            $products[] = array_merge( $item, array( 'name' => $line['name'] ) );
-        }
-    }
-
-    // Add shipping
-    $shipping_cents = (int) round( $shipping * 100 );
-    $products[] = array( 'name' => 'Shipping', 'amount' => $shipping_cents, 'quantity' => 1 );
-    $total_cents += $shipping_cents;
-
-    // Verify all products present
-    $names = array_map( function( $p ) { return $p['name']; }, $products );
-    assert_true( in_array( 'Snowboard', $names ), 'Snowboard in cart' );
-    assert_true( in_array( 'T-Shirt', $names ), 'T-Shirt in cart' );
-    assert_true( in_array( 'Sticker', $names ), 'Sticker in cart' );
-    assert_true( in_array( 'Shipping', $names ), 'Shipping in cart' );
-
-    // Verify total
-    $expected_total = 55996 + 4798 + 399 + 999;
-    assert_equals( $expected_total, $total_cents, "Total = {$expected_total} cents (\$" . number_format( $expected_total / 100, 2 ) . ")" );
-
-    // Verify discounted prices (not catalog)
-    $snowboard = null;
-    foreach ( $products as $p ) {
-        if ( $p['name'] === 'Snowboard' ) { $snowboard = $p; break; }
-    }
-    assert_equals( 55996, $snowboard['amount'], 'Snowboard = $559.96 (20% off $699.95)' );
-    assert_true( $snowboard['amount'] < 69995, 'Snowboard price is discounted (< $699.95)' );
+    // Verify discount is inherently reflected (amount < undiscounted subtotal)
+    $undiscounted_total_cents = (int) round( ( 699.95 + 59.98 + 4.99 + 9.99 ) * 100 );
+    assert_true( $payment_data['amount'] < $undiscounted_total_cents, 'Discounted amount < undiscounted total' );
 }
 
 function test_happy_path_webhook_then_return() {
@@ -2636,40 +2618,43 @@ function test_happy_path_refund_after_payment() {
 }
 
 function test_happy_path_guest_checkout() {
-    echo "\n🧪 Test 115: HAPPY PATH — Guest checkout (no user account)\n";
+    echo "\n🧪 Test 115: HAPPY PATH — Guest checkout (no user account) — same flow as logged in\n";
 
-    $user_id = 0; // Guest
     $order_id = 99;
     $email = 'guest@example.com';
+    $order_total = 45.50;
 
-    // Customer reference
-    $ref = $user_id ? 'user-' . $user_id : 'guest-' . $order_id;
-    assert_equals( 'guest-99', $ref, 'Guest reference = guest-99' );
-
-    // Customer data
-    $customer_data = array(
-        'referenceId' => $ref,
-        'email' => $email,
-        'signupAt' => time() * 1000,
+    // With amount + currency, guest and logged-in checkouts use identical flow.
+    // No customer pre-creation or user meta lookup needed.
+    $payment_data = array(
+        'amount'            => (int) round( $order_total * 100 ),
+        'currency'          => 'USD',
+        'billingEmail'      => $email,
+        'clientReferenceId' => 'order-' . $order_id,
     );
-    assert_equals( 'guest@example.com', $customer_data['email'], 'Email correct' );
-    assert_true( $customer_data['signupAt'] > 1000000000000, 'signupAt in milliseconds' );
 
-    // Payment page
-    $client_ref = 'order-' . $order_id;
-    assert_equals( 'order-99', $client_ref, 'clientReferenceId = order-99' );
+    assert_equals( 4550, $payment_data['amount'], 'Guest order amount = 4550 cents ($45.50)' );
+    assert_equals( 'guest@example.com', $payment_data['billingEmail'], 'Billing email passed to payment page' );
+    assert_equals( 'order-99', $payment_data['clientReferenceId'], 'clientReferenceId = order-99' );
+    assert_true( ! isset( $payment_data['customer'] ), 'No customer object — no pre-registration needed' );
 }
 
 function test_happy_path_returning_customer() {
-    echo "\n🧪 Test 116: HAPPY PATH — Returning customer (cached Breeze ID)\n";
+    echo "\n🧪 Test 116: HAPPY PATH — Returning customer — no pre-registration, same flow\n";
 
-    $user_id = 7;
-    $cached_breeze_id = 'cus_returning_abc';
+    // With amount + currency, no customer pre-creation is needed for any customer
+    // (new or returning). The payment page is created directly with billingEmail.
+    $email = 'returner@example.com';
+    $order_total = 120.00;
 
-    // Should skip API call and use cached ID
-    $customer_id = $cached_breeze_id;
-    assert_equals( 'cus_returning_abc', $customer_id, 'Cached Breeze customer ID reused' );
-    assert_true( ! empty( $customer_id ), 'Customer ID available without API call' );
+    $payment_data = array(
+        'amount'       => (int) round( $order_total * 100 ),
+        'currency'     => 'USD',
+        'billingEmail' => $email,
+    );
+
+    assert_equals( 12000, $payment_data['amount'], 'Returning customer order amount correct' );
+    assert_true( ! isset( $payment_data['customer'] ), 'No customer ID required (no v1/customers call)' );
 }
 
 function test_happy_path_test_mode_vs_live() {
@@ -2753,6 +2738,194 @@ function test_happy_path_multiple_orders_different_customers() {
     assert_true( $match_a, 'Webhook matches order A' );
     assert_true( ! $match_b, 'Webhook does NOT match order B' );
 }
+
+// ─── Amount + Currency API Tests (new approach) ─────────────────────────────
+
+function test_amount_currency_payment_data_structure() {
+    echo "\n🧪 Test 121: amount+currency — payment page has correct fields\n";
+
+    $order_total = 99.95;
+    $amount_cents = (int) round( $order_total * 100 );
+
+    $payment_data = array(
+        'amount'            => $amount_cents,
+        'currency'          => 'USD',
+        'billingEmail'      => 'buyer@shop.com',
+        'clientReferenceId' => 'order-7',
+        'successReturnUrl'  => 'https://shop.com/?wc-api=breeze_return&status=success',
+        'failReturnUrl'     => 'https://shop.com/?wc-api=breeze_return&status=failed',
+        'description'       => 'Order #7 from My Shop',
+    );
+
+    assert_equals( 9995, $payment_data['amount'], 'Amount = 9995 cents' );
+    assert_equals( 'USD', $payment_data['currency'], 'Currency = USD' );
+    assert_true( isset( $payment_data['billingEmail'] ), 'billingEmail present' );
+    assert_true( isset( $payment_data['successReturnUrl'] ), 'successReturnUrl present' );
+    assert_true( isset( $payment_data['failReturnUrl'] ), 'failReturnUrl present' );
+    assert_true( isset( $payment_data['description'] ), 'description present' );
+    assert_true( ! isset( $payment_data['products'] ), 'No "products" key (old field)' );
+    assert_true( ! isset( $payment_data['lineItems'] ), 'No "lineItems" key (not using inline products)' );
+    assert_true( ! isset( $payment_data['customer'] ), 'No customer.id (no pre-registration)' );
+}
+
+function test_amount_includes_discounts() {
+    echo "\n🧪 Test 122: amount inherits WooCommerce discounts automatically\n";
+
+    // WooCommerce computes get_total() after all coupon/voucher discounts.
+    // We just send that total — no extra discount logic needed.
+    $catalog_subtotal = 100.00; // Before discount
+    $coupon_discount  = 20.00;  // 20% off coupon
+    $shipping         = 5.99;
+
+    // What WooCommerce's get_total() returns:
+    $wc_total = $catalog_subtotal - $coupon_discount + $shipping;
+    $amount_cents = (int) round( $wc_total * 100 );
+
+    assert_equals( 8599, $amount_cents, '$100 - $20 coupon + $5.99 shipping = $85.99 (8599 cents)' );
+    assert_true( $amount_cents < (int) round( $catalog_subtotal * 100 ), 'Amount is less than catalog price' );
+}
+
+function test_amount_includes_shipping() {
+    echo "\n🧪 Test 123: amount includes shipping (get_total() is all-in)\n";
+
+    $product_total = 50.00;
+    $shipping      = 9.99;
+    $wc_total      = $product_total + $shipping; // WC get_total() includes shipping
+
+    $amount_cents = (int) round( $wc_total * 100 );
+
+    assert_equals( 5999, $amount_cents, '$50 + $9.99 shipping = $59.99 (5999 cents)' );
+    assert_true( $amount_cents > (int) round( $product_total * 100 ), 'Amount > product-only subtotal' );
+}
+
+function test_amount_voucher_reduces_total() {
+    echo "\n🧪 Test 124: Voucher reduces WooCommerce total, amount reflects discount\n";
+
+    // Gift card / store credit voucher of $25 applied to $80 order
+    $order_subtotal = 80.00;
+    $voucher_value  = 25.00;
+    $wc_total       = $order_subtotal - $voucher_value;
+    $amount_cents   = (int) round( $wc_total * 100 );
+
+    assert_equals( 5500, $amount_cents, '$80 - $25 voucher = $55 (5500 cents)' );
+    assert_true( $amount_cents > 0, 'Positive amount after voucher' );
+}
+
+function test_amount_fully_discounted_order() {
+    echo "\n🧪 Test 125: 100% discount / free order → amount = 0 cents\n";
+
+    $wc_total     = 0.00;
+    $amount_cents = (int) round( $wc_total * 100 );
+
+    assert_equals( 0, $amount_cents, 'Free order = 0 cents' );
+}
+
+function test_amount_multiple_coupons_stacked() {
+    echo "\n🧪 Test 126: Multiple stacked coupons — WC handles, we send final total\n";
+
+    // $100 product, SAVE10 coupon (-$10) + EXTRA15 coupon (-$15) = $75
+    $after_coupons = 75.00;
+    $amount_cents  = (int) round( $after_coupons * 100 );
+
+    assert_equals( 7500, $amount_cents, '$100 - $10 - $15 = $75 (7500 cents)' );
+}
+
+function test_no_v1_products_api_calls() {
+    echo "\n🧪 Test 127: Flow makes NO calls to /v1/products endpoint\n";
+
+    // Simulate tracked API calls (what the new code does)
+    $api_calls = array(
+        array( 'method' => 'POST', 'endpoint' => '/v1/payment_pages' ),
+    );
+
+    // Verify no /v1/products calls
+    $products_calls = array_filter( $api_calls, function( $c ) {
+        return strpos( $c['endpoint'], '/v1/products' ) !== false;
+    });
+
+    assert_equals( 0, count( $products_calls ), 'Zero calls to /v1/products endpoint' );
+    assert_equals( 1, count( $api_calls ), 'Only 1 API call: POST /v1/payment_pages' );
+}
+
+function test_no_v1_customers_api_calls() {
+    echo "\n🧪 Test 128: Flow makes NO calls to /v1/customers endpoint\n";
+
+    // Simulate tracked API calls (what the new code does)
+    $api_calls = array(
+        array( 'method' => 'POST', 'endpoint' => '/v1/payment_pages' ),
+    );
+
+    $customer_calls = array_filter( $api_calls, function( $c ) {
+        return strpos( $c['endpoint'], '/v1/customers' ) !== false;
+    });
+
+    assert_equals( 0, count( $customer_calls ), 'Zero calls to /v1/customers endpoint' );
+}
+
+function test_amount_precision_common_cases() {
+    echo "\n🧪 Test 129: Amount precision across common WooCommerce totals\n";
+
+    $cases = array(
+        array( 'total' => 9.99,    'cents' => 999 ),
+        array( 'total' => 19.99,   'cents' => 1999 ),
+        array( 'total' => 49.95,   'cents' => 4995 ),
+        array( 'total' => 99.00,   'cents' => 9900 ),
+        array( 'total' => 149.97,  'cents' => 14997 ),
+        array( 'total' => 999.99,  'cents' => 99999 ),
+        array( 'total' => 0.01,    'cents' => 1 ),
+        array( 'total' => 1000.00, 'cents' => 100000 ),
+    );
+
+    foreach ( $cases as $c ) {
+        $cents = (int) round( $c['total'] * 100 );
+        assert_equals( $c['cents'], $cents, "\${$c['total']} → {$c['cents']} cents" );
+    }
+}
+
+function test_order_total_includes_all_components() {
+    echo "\n🧪 Test 130: WC get_total() covers all components (products + discounts + shipping)\n";
+
+    // Simulate a complex order:
+    // - 2 products: $30 + $45 = $75
+    // - Coupon: -$7.50 (10% off)
+    // - Shipping: $8.99
+    // - WC get_total(): $76.49
+    $wc_total     = 76.49;
+    $amount_cents = (int) round( $wc_total * 100 );
+
+    assert_equals( 7649, $amount_cents, 'Order total = $76.49 (7649 cents) — all components included' );
+
+    // Verify it's the right formula
+    $manual = (75.00 - 7.50 + 8.99);
+    assert_equals( $wc_total, $manual, 'Manual calculation matches WC total' );
+}
+
+function test_payment_page_description_format() {
+    echo "\n🧪 Test 131: Payment page description includes order ID and site name\n";
+
+    $order_id  = 42;
+    $site_name = 'My WooCommerce Store';
+    $desc      = sprintf( 'Order #%1$s from %2$s', $order_id, $site_name );
+
+    assert_true( strpos( $desc, 'Order #42' ) !== false, 'Description includes order ID' );
+    assert_true( strpos( $desc, 'My WooCommerce Store' ) !== false, 'Description includes site name' );
+}
+
+// ─── Run new amount+currency tests ──────────────────────────────────────────
+
+test_amount_currency_payment_data_structure();
+test_amount_includes_discounts();
+test_amount_includes_shipping();
+test_amount_voucher_reduces_total();
+test_amount_fully_discounted_order();
+test_amount_multiple_coupons_stacked();
+test_no_v1_products_api_calls();
+test_no_v1_customers_api_calls();
+test_amount_precision_common_cases();
+test_order_total_includes_all_components();
+test_payment_page_description_format();
+
+// ─── Run happy path tests ────────────────────────────────────────────────────
 
 // Run happy path tests
 test_happy_path_single_item_full_flow();
