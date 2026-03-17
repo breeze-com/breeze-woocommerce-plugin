@@ -235,15 +235,15 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 throw new Exception( __( 'Failed to create customer in Breeze.', 'breeze-payment-gateway' ) );
             }
 
-            // Step 2: Create products array for order items
-            $products = $this->create_breeze_products_array( $order );
-            
-            if ( empty( $products ) ) {
-                throw new Exception( __( 'Failed to create products array.', 'breeze-payment-gateway' ) );
+            // Step 2: Build line items using client product IDs (inline products)
+            $line_items = $this->build_line_items( $order );
+
+            if ( empty( $line_items ) ) {
+                throw new Exception( __( 'Failed to build line items.', 'breeze-payment-gateway' ) );
             }
 
             // Step 3: Create payment page
-            $payment_page = $this->create_breeze_payment_page( $order, $customer_id, $products );
+            $payment_page = $this->create_breeze_payment_page( $order, $customer_id, $line_items );
             
             if ( ! $payment_page || empty( $payment_page['url'] ) ) {
                 throw new Exception( __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
@@ -347,117 +347,128 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Create line items for Breeze payment page
+     * Build line items array for Breeze payment page using the
+     * "Inline Products (Your Product IDs)" approach (`clientProductId`).
+     *
+     * Each WooCommerce product is mapped to a Breeze line item carrying the
+     * merchant's own product ID as `clientProductId`. This is preferred over
+     * anonymous inline products because Breeze can correlate purchases to known
+     * SKUs in the merchant's catalogue.
+     *
+     * Line item shape (clientProductId variant):
+     *   clientProductId  string   — merchant's product ID (required)
+     *   displayName      string   — human-readable name shown on the payment page (required)
+     *   amount           int      — per-unit price in minor currency units / cents (required)
+     *   currency         string   — ISO 4217 currency code (required)
+     *   quantity         int      — number of units (required, ≥ 1)
+     *   description      string   — optional short description
+     *   image            string   — optional single image URL
+     *
+     * Rounding strategy (qty > 1 with coupon-adjusted line totals):
+     *   floor(line_total_cents / qty) × (qty-1)  +  (line_total_cents - floor×(qty-1))
+     *   ensures the sum always equals the exact WooCommerce line total.
      *
      * @param WC_Order $order Order object.
      * @return array Line items array.
      */
-    /**
-     * Create products array for Breeze payment page
-     *
-     * @param WC_Order $order Order object.
-     * @return array Products array.
-     */
-    private function create_breeze_products_array( $order ) {
-        
-        $products = array();
+    private function build_line_items( $order ) {
 
-        // Get order items
-        foreach ( $order->get_items() as $item_id => $item ) {
-            
+        $line_items = array();
+
+        foreach ( $order->get_items() as $item ) {
+
             $product = $item->get_product();
-            
+
             if ( ! $product ) {
                 continue;
             }
 
-            // Use the line item total (post-coupon) to calculate per-unit price.
-            // Handle rounding carefully: for qty > 1, the naive approach of
-            // round(total/qty) * qty may not equal the actual line total.
-            //
-            // Strategy: If qty == 1, use the exact line total in cents.
-            // If qty > 1, split into (qty-1) units at floor(total_cents/qty)
-            // and 1 unit absorbing the remainder. This guarantees the sum
-            // equals the exact line total. We emit qty-1 at the base price
-            // and 1 at base+remainder.
             $qty = $item->get_quantity();
 
             if ( $qty <= 0 ) {
-                continue; // Skip zero/negative quantity items
+                continue;
             }
 
             $line_total_cents = (int) round( $item->get_total() * 100 );
             $base_unit_cents  = (int) floor( $line_total_cents / $qty );
             $remainder_cents  = $line_total_cents - ( $base_unit_cents * $qty );
 
-            $description = $product->get_short_description() ? $product->get_short_description() : $item->get_name();
+            $client_product_id = (string) $product->get_id();
+            $display_name      = $item->get_name();
+            $description       = $product->get_short_description()
+                ? wp_strip_all_tags( $product->get_short_description() )
+                : '';
+            $image_url         = wp_get_attachment_url( $product->get_image_id() );
+            $currency          = $order->get_currency();
 
-            // If no remainder, emit a single product entry for the full quantity.
-            // If there IS a remainder, split: (qty-1) at base price + 1 at base+remainder.
-            // This keeps the Breeze payment page total exactly matching WooCommerce.
             if ( $remainder_cents === 0 ) {
-                $product_item = array(
-                    'name'        => $item->get_name(),
-                    'description' => $description,
-                    'currency'    => $order->get_currency(),
-                    'amount'      => $base_unit_cents,
-                    'quantity'    => $qty,
+                // Clean division — emit a single line item for the full quantity.
+                $entry = array(
+                    'clientProductId' => $client_product_id,
+                    'displayName'     => $display_name,
+                    'amount'          => $base_unit_cents,
+                    'currency'        => $currency,
+                    'quantity'        => $qty,
                 );
+                if ( $description ) {
+                    $entry['description'] = $description;
+                }
+                if ( $image_url ) {
+                    $entry['image'] = $image_url;
+                }
+                $line_items[] = $entry;
             } else {
-                // Emit the bulk at base price
+                // Remainder — split to preserve the exact line total.
+                // (qty - 1) units at the base price …
                 if ( $qty > 1 ) {
-                    $bulk_item = array(
-                        'name'        => $item->get_name(),
-                        'description' => $description,
-                        'currency'    => $order->get_currency(),
-                        'amount'      => $base_unit_cents,
-                        'quantity'    => $qty - 1,
+                    $bulk = array(
+                        'clientProductId' => $client_product_id,
+                        'displayName'     => $display_name,
+                        'amount'          => $base_unit_cents,
+                        'currency'        => $currency,
+                        'quantity'        => $qty - 1,
                     );
-
-                    $image_url = wp_get_attachment_url( $product->get_image_id() );
+                    if ( $description ) {
+                        $bulk['description'] = $description;
+                    }
                     if ( $image_url ) {
-                        $bulk_item['images'] = array( $image_url );
+                        $bulk['image'] = $image_url;
                     }
-                    if ( $product->get_id() ) {
-                        $bulk_item['id'] = (string) $product->get_id();
-                    }
-
-                    $products[] = $bulk_item;
+                    $line_items[] = $bulk;
                 }
 
-                // Emit 1 unit absorbing the remainder
-                $product_item = array(
-                    'name'        => $item->get_name(),
-                    'description' => $description,
-                    'currency'    => $order->get_currency(),
-                    'amount'      => $base_unit_cents + $remainder_cents,
-                    'quantity'    => 1,
+                // … and 1 unit at base + remainder to absorb the rounding delta.
+                $tail = array(
+                    'clientProductId' => $client_product_id,
+                    'displayName'     => $display_name,
+                    'amount'          => $base_unit_cents + $remainder_cents,
+                    'currency'        => $currency,
+                    'quantity'        => 1,
                 );
+                if ( $description ) {
+                    $tail['description'] = $description;
+                }
+                if ( $image_url ) {
+                    $tail['image'] = $image_url;
+                }
+                $line_items[] = $tail;
             }
-
-            // Add image if available
-            $image_url = wp_get_attachment_url( $product->get_image_id() );
-            if ( $image_url ) {
-                $product_item['images'] = array( $image_url );
-            }
-
-            // Add optional ID from merchant's system
-            if ( $product->get_id() ) {
-                $product_item['id'] = (string) $product->get_id();
-            }
-
-            $products[] = $product_item;
         }
 
-        // Add shipping as a product if present
+        // Shipping as a virtual line item (clientProductId = 'shipping').
         if ( $order->get_shipping_total() > 0 ) {
-            $products[] = array(
-                'name'        => __( 'Shipping', 'breeze-payment-gateway' ),
-                'description' => $order->get_shipping_method(),
-                'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $order->get_shipping_total() * 100 ), // Amount in cents
-                'quantity'    => 1,
+            $shipping_item = array(
+                'clientProductId' => 'shipping',
+                'displayName'     => __( 'Shipping', 'breeze-payment-gateway' ),
+                'amount'          => (int) round( $order->get_shipping_total() * 100 ),
+                'currency'        => $order->get_currency(),
+                'quantity'        => 1,
             );
+            $shipping_method = $order->get_shipping_method();
+            if ( $shipping_method ) {
+                $shipping_item['description'] = $shipping_method;
+            }
+            $line_items[] = $shipping_item;
         }
 
         // NOTE: Do NOT send WooCommerce tax as a line item.
@@ -465,21 +476,21 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // Sending WooCommerce tax would result in double-taxation for the customer.
 
         // NOTE: Discounts are already reflected in the per-unit price above
-        // ($item->get_total() includes coupon/discount adjustments).
-        // No need to distribute discounts separately.
+        // ($item->get_total() returns the post-coupon line total).
+        // No separate discount line items are required.
 
-        return $products;
+        return $line_items;
     }
 
     /**
      * Create payment page in Breeze
      *
-     * @param WC_Order $order Order object.
-     * @param string $customer_id Breeze customer ID.
-     * @param array $products Products array.
+     * @param WC_Order $order      Order object.
+     * @param string   $customer_id Breeze customer ID.
+     * @param array    $line_items  Line items built by build_line_items().
      * @return array|false Payment page data or false on failure.
      */
-    private function create_breeze_payment_page( $order, $customer_id, $products ) {
+    private function create_breeze_payment_page( $order, $customer_id, $line_items ) {
 
         // Generate a one-time return token to prevent unauthenticated order status manipulation.
         // The token is included in both return URLs and verified in handle_return().
@@ -488,7 +499,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $order->save();
 
         $payment_data = array(
-            'products'          => $products,
+            'lineItems'         => $line_items,
             'billingEmail'      => $order->get_billing_email(),
             // Append a unique suffix so retries (same order, new payment attempt)
             // don't collide with the previous payment page already in Breeze.
