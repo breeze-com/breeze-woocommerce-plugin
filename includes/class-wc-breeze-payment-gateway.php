@@ -369,7 +369,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'name'        => $item->get_name(),
                 'description' => $product->get_short_description() ? $product->get_short_description() : $item->get_name(),
                 'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $item->get_product()->get_price() * 100 ), // Amount in cents
+                'amount'      => (int) round( (float) $item->get_product()->get_price() * 100 ), // Amount in cents
                 'quantity'    => $item->get_quantity(),
             );
 
@@ -393,7 +393,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'name'        => __( 'Shipping', 'breeze-payment-gateway' ),
                 'description' => $order->get_shipping_method(),
                 'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $order->get_shipping_total() * 100 ), // Amount in cents
+                'amount'      => (int) round( (float) $order->get_shipping_total() * 100 ), // Amount in cents
                 'quantity'    => 1,
             );
         }
@@ -404,7 +404,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'name'        => __( 'Tax', 'breeze-payment-gateway' ),
                 'description' => __( 'Tax', 'breeze-payment-gateway' ),
                 'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $order->get_total_tax() * 100 ), // Amount in cents
+                'amount'      => (int) round( (float) $order->get_total_tax() * 100 ), // Amount in cents
                 'quantity'    => 1,
             );
         }
