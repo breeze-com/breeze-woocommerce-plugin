@@ -386,7 +386,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 continue; // Skip zero/negative quantity items
             }
 
-            $line_total_cents = (int) round( $item->get_total() * 100 );
+            $line_total_cents = (int) round( (float) $item->get_total() * 100 );
             $base_unit_cents  = (int) floor( $line_total_cents / $qty );
             $remainder_cents  = $line_total_cents - ( $base_unit_cents * $qty );
 
@@ -455,7 +455,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'name'        => __( 'Shipping', 'breeze-payment-gateway' ),
                 'description' => $order->get_shipping_method(),
                 'currency'    => $order->get_currency(),
-                'amount'      => (int) round( $order->get_shipping_total() * 100 ), // Amount in cents
+                'amount'      => (int) round( (float) $order->get_shipping_total() * 100 ), // Amount in cents
                 'quantity'    => 1,
             );
         }
