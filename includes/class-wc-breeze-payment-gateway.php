@@ -373,13 +373,20 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
      */
     private function build_line_items( $order ) {
 
-        $line_items = array();
+        // Breeze caps lineItems at 20 entries. Reserve 1 slot for shipping.
+        $max_product_entries = 19;
+        $line_items          = array();
 
         foreach ( $order->get_items() as $item ) {
 
             $product = $item->get_product();
 
             if ( ! $product ) {
+                continue;
+            }
+
+            // Skip items with no valid product ID (e.g. unattached variations).
+            if ( ! $product->get_id() ) {
                 continue;
             }
 
@@ -390,16 +397,31 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             }
 
             $line_total_cents = (int) round( (float) $item->get_total() * 100 );
-            $base_unit_cents  = (int) floor( $line_total_cents / $qty );
-            $remainder_cents  = $line_total_cents - ( $base_unit_cents * $qty );
+
+            // Skip zero-amount items (free / 100%-discounted) — spec requires amount ≥ 1.
+            if ( $line_total_cents <= 0 ) {
+                continue;
+            }
+
+            $base_unit_cents = (int) floor( $line_total_cents / $qty );
+            $remainder_cents = $line_total_cents - ( $base_unit_cents * $qty );
 
             $client_product_id = (string) $product->get_id();
-            $display_name      = $item->get_name();
+            $display_name      = mb_substr( $item->get_name(), 0, 100 );
             $description       = $product->get_short_description()
-                ? wp_strip_all_tags( $product->get_short_description() )
+                ? mb_substr( wp_strip_all_tags( $product->get_short_description() ), 0, 280 )
                 : '';
             $image_url         = wp_get_attachment_url( $product->get_image_id() );
             $currency          = $order->get_currency();
+
+            // A remainder forces a two-entry split; otherwise one entry suffices.
+            $entries_needed = ( $remainder_cents !== 0 && $qty > 1 ) ? 2 : 1;
+
+            if ( count( $line_items ) + $entries_needed > $max_product_entries ) {
+                throw new Exception(
+                    __( 'Order has too many line items for Breeze (max 19 product entries plus shipping). Please contact support.', 'breeze-payment-gateway' )
+                );
+            }
 
             if ( $remainder_cents === 0 ) {
                 // Clean division — emit a single line item for the full quantity.
@@ -466,7 +488,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             );
             $shipping_method = $order->get_shipping_method();
             if ( $shipping_method ) {
-                $shipping_item['description'] = $shipping_method;
+                $shipping_item['description'] = mb_substr( $shipping_method, 0, 280 );
             }
             $line_items[] = $shipping_item;
         }
