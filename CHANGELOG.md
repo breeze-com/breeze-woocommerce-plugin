@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Changed
+- **Payment page creation now uses `lineItems` with `clientProductId`** (Inline Products — Your Product IDs) instead of the legacy anonymous `products` array.
+  - Each WooCommerce product is mapped to a `lineItems` entry carrying the merchant's own product ID as `clientProductId`.
+  - Field renames: `name` → `displayName`, `images` (array) → `image` (single URL).
+  - Shipping is emitted as a virtual line item with `clientProductId: 'shipping'`.
+  - Rounding strategy for coupon-adjusted multi-unit lines is preserved.
+
+---
+
 ## [1.0.0] - 2026-02-26
 
 ### Added
