@@ -3,7 +3,7 @@
  * Plugin Name: Breeze
  * Plugin URI: https://breeze.com
  * Description: Accept payments through Breeze payment gateway for WooCommerce
- * Version: 1.0.2
+ * Version: 1.1.0
  * Author: Breeze
  * Author URI: https://breeze.com
  * Text Domain: breeze-payment-gateway
