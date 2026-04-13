@@ -30,6 +30,10 @@ fi
 wp plugin install woocommerce --activate --allow-root
 wp plugin activate breeze-payment-gateway --allow-root
 
+# Configure Breeze payment gateway settings
+BREEZE_SETTINGS=$(printf '{"enabled":"yes","testmode":"yes","test_api_key":"%s","live_api_key":"","webhook_secret":"","debug":"yes"}' "${BREEZE_TEST_API_KEY:-}")
+wp option update woocommerce_breeze_payment_gateway_settings "$BREEZE_SETTINGS" --format=json --allow-root
+
 # Fix permissions after WooCommerce activation — WC creates wc-logs subdirectories
 # during activation (as root), so chown must run after, not before.
 chown -R www-data:www-data wp-content/uploads wp-content/upgrade || true
