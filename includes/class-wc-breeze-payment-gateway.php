@@ -455,14 +455,21 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $order->update_meta_data( '_breeze_return_token', $return_token );
         $order->save();
 
-        $user_id  = $order->get_user_id();
-        $customer = array(
-            'referenceId' => $user_id ? 'user-' . $user_id : 'guest-' . $order->get_id(),
-            'email'       => $order->get_billing_email(),
-            'firstName'   => $order->get_billing_first_name(),
-            'lastName'    => $order->get_billing_last_name(),
-            'signupAt'    => time() * 1000,
-        );
+        // Look up existing customer by email; if found pass their Breeze ID,
+        // otherwise supply the full object for inline creation.
+        $user_id        = $order->get_user_id();
+        $lookup         = $this->breeze_api_request( 'GET', '/v1/customers?email=' . rawurlencode( $order->get_billing_email() ) );
+        if ( $lookup && isset( $lookup['data']['id'] ) ) {
+            $customer = array( 'id' => $lookup['data']['id'] );
+        } else {
+            $customer = array(
+                'referenceId' => $user_id ? 'user-' . $user_id : 'guest-' . $order->get_id(),
+                'email'       => $order->get_billing_email(),
+                'firstName'   => $order->get_billing_first_name(),
+                'lastName'    => $order->get_billing_last_name(),
+                'signupAt'    => time() * 1000,
+            );
+        }
 
         $payment_data = array(
             'lineItems'         => $line_items,
