@@ -227,30 +227,22 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         }
 
         try {
-            
-            // Step 1: Create or get customer in Breeze
-            $customer_id = $this->get_or_create_breeze_customer( $order );
-            
-            if ( ! $customer_id ) {
-                throw new Exception( __( 'Failed to create customer in Breeze.', 'breeze-payment-gateway' ) );
-            }
 
-            // Step 2: Build line items using client product IDs (inline products)
+            // Step 1: Build line items using client product IDs (inline products)
             $line_items = $this->build_line_items( $order );
 
             if ( empty( $line_items ) ) {
                 throw new Exception( __( 'Failed to build line items.', 'breeze-payment-gateway' ) );
             }
 
-            // Step 3: Create payment page
-            $payment_page = $this->create_breeze_payment_page( $order, $customer_id, $line_items );
-            
+            // Step 2: Create payment page (customer data passed inline)
+            $payment_page = $this->create_breeze_payment_page( $order, $line_items );
+
             if ( ! $payment_page || empty( $payment_page['url'] ) ) {
                 throw new Exception( __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
             }
 
-            // Store Breeze data in order meta
-            $order->update_meta_data( '_breeze_customer_id', $customer_id );
+            // Store payment page ID for refunds and webhook reconciliation
             $order->update_meta_data( '_breeze_payment_page_id', $payment_page['id'] );
             $order->save();
 
@@ -288,62 +280,6 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'messages' => array( $e->getMessage() ),
             );
         }
-    }
-
-    /**
-     * Get or create customer in Breeze
-     *
-     * @param WC_Order $order Order object.
-     * @return string|false Customer ID or false on failure.
-     */
-    private function get_or_create_breeze_customer( $order ) {
-        
-        // Check if customer already has Breeze ID from prior store Order
-        $user_id = $order->get_user_id();
-        
-        if ( $user_id ) {
-            $breeze_customer_id = get_user_meta( $user_id, '_breeze_customer_id', true );
-            
-            if ( $breeze_customer_id ) {
-                return $breeze_customer_id;
-            }
-        }
-
-        // Check if customer already has Breeze ID from another Merchant or Channel
-        $response = $this->breeze_api_request( 'GET', '/v1/customers?email=' . rawurlencode( $order->get_billing_email() ) );
-
-        if ( $response && isset( $response['data']['id'] ) ) {
-            $customer_id = $response['data']['id'];
-            
-            // Save to user meta if logged in
-            if ( $user_id ) {
-                update_user_meta( $user_id, '_breeze_customer_id', $customer_id );
-            }
-            
-            return $customer_id;
-        }
-        
-        // Create new customer
-        $customer_data = array(
-            'referenceId' => $user_id ? 'user-' . $user_id : 'guest-' . $order->get_id(),
-            'email'       => $order->get_billing_email(),
-            'signupAt'    => time() * 1000, // Convert to milliseconds
-        );
-
-        $response = $this->breeze_api_request( 'POST', '/v1/customers', $customer_data );
-
-        if ( $response && isset( $response['data']['id'] ) ) {
-            $customer_id = $response['data']['id'];
-            
-            // Save to user meta if logged in
-            if ( $user_id ) {
-                update_user_meta( $user_id, '_breeze_customer_id', $customer_id );
-            }
-            
-            return $customer_id;
-        }
-
-        return false;
     }
 
     /**
@@ -508,17 +444,25 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
      * Create payment page in Breeze
      *
      * @param WC_Order $order      Order object.
-     * @param string   $customer_id Breeze customer ID.
-     * @param array    $line_items  Line items built by build_line_items().
+     * @param array    $line_items Line items built by build_line_items().
      * @return array|false Payment page data or false on failure.
      */
-    private function create_breeze_payment_page( $order, $customer_id, $line_items ) {
+    private function create_breeze_payment_page( $order, $line_items ) {
 
         // Generate a one-time return token to prevent unauthenticated order status manipulation.
         // The token is included in both return URLs and verified in handle_return().
         $return_token = wp_generate_password( 32, false );
         $order->update_meta_data( '_breeze_return_token', $return_token );
         $order->save();
+
+        $user_id  = $order->get_user_id();
+        $customer = array(
+            'referenceId' => $user_id ? 'user-' . $user_id : 'guest-' . $order->get_id(),
+            'email'       => $order->get_billing_email(),
+            'firstName'   => $order->get_billing_first_name(),
+            'lastName'    => $order->get_billing_last_name(),
+            'signupAt'    => time() * 1000,
+        );
 
         $payment_data = array(
             'lineItems'         => $line_items,
@@ -547,9 +491,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 ),
                 home_url( '/' )
             ),
-            'customer'          => array(
-                'id' => $customer_id,
-            ),
+            'customer'          => $customer,
         );
 
         $response = $this->breeze_api_request( 'POST', '/v1/payment_pages', $payment_data );
