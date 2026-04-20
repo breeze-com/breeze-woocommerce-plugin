@@ -21,6 +21,29 @@ if ( ! function_exists( 'absint' ) ) {
     }
 }
 
+if ( ! function_exists( 'wp_strip_all_tags' ) ) {
+    function wp_strip_all_tags( $string, $remove_breaks = false ) {
+        $string = preg_replace( '@<(script|style)[^>]*?>.*?</\\1>@si', '', $string );
+        $string = strip_tags( $string );
+        if ( $remove_breaks ) {
+            $string = preg_replace( '/[\r\n\t ]+/', ' ', $string );
+        }
+        return trim( $string );
+    }
+}
+
+if ( ! function_exists( 'esc_url' ) ) {
+    function esc_url( $url ) {
+        return htmlspecialchars( $url, ENT_QUOTES, 'UTF-8' );
+    }
+}
+
+if ( ! function_exists( 'esc_attr' ) ) {
+    function esc_attr( $text ) {
+        return htmlspecialchars( $text, ENT_QUOTES, 'UTF-8' );
+    }
+}
+
 // Track all calls for assertions
 $_test_log = array();
 
@@ -2754,6 +2777,147 @@ function test_happy_path_multiple_orders_different_customers() {
     assert_true( ! $match_b, 'Webhook does NOT match order B' );
 }
 
+function test_send_product_description_off_by_default() {
+    echo "\n🧪 Test 121: send_product_description OFF (default) — description absent from lineItems\n";
+
+    // Simulate build_line_items behaviour with send_product_description = false
+    $send_product_description = false;
+
+    $short_desc = 'A great widget for all occasions.';
+    $description = $send_product_description && $short_desc
+        ? mb_substr( wp_strip_all_tags( $short_desc ), 0, 280 )
+        : '';
+
+    assert_equals( '', $description, 'description is empty when toggle is off' );
+
+    // Simulate the lineItem that would be built
+    $entry = array(
+        'clientProductId' => '42',
+        'displayName'     => 'Widget Pro',
+        'amount'          => 1999,
+        'currency'        => 'USD',
+        'quantity'        => 1,
+    );
+    if ( $description ) {
+        $entry['description'] = $description;
+    }
+
+    assert_true( ! isset( $entry['description'] ), 'description key absent from lineItem when toggle is off' );
+}
+
+function test_send_product_description_on() {
+    echo "\n🧪 Test 122: send_product_description ON — description present and truncated in lineItems\n";
+
+    $send_product_description = true;
+
+    // Normal description
+    $short_desc = 'A great widget for all occasions.';
+    $description = $send_product_description && $short_desc
+        ? mb_substr( wp_strip_all_tags( $short_desc ), 0, 280 )
+        : '';
+
+    assert_equals( 'A great widget for all occasions.', $description, 'description included when toggle is on' );
+
+    // HTML stripped
+    $html_desc = '<p>Bold <strong>claim</strong> about this product.</p>';
+    $stripped = $send_product_description && $html_desc
+        ? mb_substr( wp_strip_all_tags( $html_desc ), 0, 280 )
+        : '';
+    assert_true( strpos( $stripped, '<p>' ) === false, 'HTML tags stripped from description' );
+    assert_true( strpos( $stripped, 'Bold' ) !== false, 'Text content preserved after stripping' );
+
+    // Long description truncated to 280 chars
+    $long_desc = str_repeat( 'x', 400 );
+    $truncated = $send_product_description && $long_desc
+        ? mb_substr( wp_strip_all_tags( $long_desc ), 0, 280 )
+        : '';
+    assert_equals( 280, mb_strlen( $truncated ), 'description truncated to 280 chars' );
+
+    // lineItem includes description key
+    $entry = array(
+        'clientProductId' => '42',
+        'displayName'     => 'Widget Pro',
+        'amount'          => 1999,
+        'currency'        => 'USD',
+        'quantity'        => 1,
+    );
+    if ( $description ) {
+        $entry['description'] = $description;
+    }
+    assert_true( isset( $entry['description'] ), 'description key present in lineItem when toggle is on' );
+    assert_equals( 'A great widget for all occasions.', $entry['description'], 'description value correct' );
+}
+
+function test_send_product_description_empty_short_desc() {
+    echo "\n🧪 Test 123: send_product_description ON but product has no short description — key omitted\n";
+
+    $send_product_description = true;
+    $short_desc = ''; // product has no short description
+
+    $description = $send_product_description && $short_desc
+        ? mb_substr( wp_strip_all_tags( $short_desc ), 0, 280 )
+        : '';
+
+    assert_equals( '', $description, 'empty short_desc yields empty description string' );
+
+    $entry = array(
+        'clientProductId' => '42',
+        'displayName'     => 'Bare Product',
+        'amount'          => 500,
+        'currency'        => 'USD',
+        'quantity'        => 1,
+    );
+    if ( $description ) {
+        $entry['description'] = $description;
+    }
+    assert_true( ! isset( $entry['description'] ), 'description key omitted when product has no short description' );
+}
+
+function test_gateway_icon_filter_our_gateway() {
+    echo "\n🧪 Test 124: filter_gateway_icon_html — constrains icon for our gateway\n";
+
+    $gateway_id    = 'breeze_payment_gateway';
+    $icon_url      = 'https://example.com/breeze-icon.png';
+    $method_title  = 'Breeze';
+
+    // Simulate the filter logic from filter_gateway_icon_html()
+    $filter = function( $icon_html, $gw_id ) use ( $gateway_id, $icon_url, $method_title ) {
+        if ( $gw_id !== $gateway_id ) {
+            return $icon_html;
+        }
+        return '<img src="' . esc_url( $icon_url ) . '" alt="' . esc_attr( $method_title ) . '" style="max-width:24px;max-height:24px;" />';
+    };
+
+    $original_html = '<img src="' . $icon_url . '" alt="Breeze" />';
+    $filtered      = $filter( $original_html, $gateway_id );
+
+    assert_true( strpos( $filtered, 'max-width:24px' ) !== false, 'max-width:24px present' );
+    assert_true( strpos( $filtered, 'max-height:24px' ) !== false, 'max-height:24px present' );
+    assert_true( strpos( $filtered, esc_url( $icon_url ) ) !== false, 'icon URL preserved' );
+    assert_true( strpos( $filtered, 'alt="Breeze"' ) !== false, 'alt text set to method title' );
+}
+
+function test_gateway_icon_filter_other_gateway() {
+    echo "\n🧪 Test 125: filter_gateway_icon_html — passthrough for other gateways\n";
+
+    $gateway_id   = 'breeze_payment_gateway';
+    $icon_url     = 'https://example.com/breeze-icon.png';
+    $method_title = 'Breeze';
+
+    $filter = function( $icon_html, $gw_id ) use ( $gateway_id, $icon_url, $method_title ) {
+        if ( $gw_id !== $gateway_id ) {
+            return $icon_html;
+        }
+        return '<img src="' . esc_url( $icon_url ) . '" alt="' . esc_attr( $method_title ) . '" style="max-width:24px;max-height:24px;" />';
+    };
+
+    $other_html = '<img src="https://stripe.com/icon.png" alt="Stripe" style="width:80px;" />';
+    $result     = $filter( $other_html, 'stripe' );
+
+    assert_equals( $other_html, $result, 'HTML unchanged for non-Breeze gateway' );
+    assert_true( strpos( $result, 'max-width:24px' ) === false, 'No size constraint injected for other gateways' );
+}
+
 // Run happy path tests
 test_happy_path_single_item_full_flow();
 test_happy_path_multi_item_with_discount();
@@ -2765,6 +2929,11 @@ test_happy_path_test_mode_vs_live();
 test_happy_path_preferred_payment_methods();
 test_happy_path_order_notes_audit_trail();
 test_happy_path_multiple_orders_different_customers();
+test_send_product_description_off_by_default();
+test_send_product_description_on();
+test_send_product_description_empty_short_desc();
+test_gateway_icon_filter_our_gateway();
+test_gateway_icon_filter_other_gateway();
 
 // Run discount rounding tests
 test_discount_rounding_3_items_10_off();
