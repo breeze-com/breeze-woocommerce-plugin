@@ -47,7 +47,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     protected $payment_methods = array();
 
     /** @var bool */
-    protected $send_product_description = false;
+    public $send_product_description = false;
 
     /**
      * Constructor for the gateway.
