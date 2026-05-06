@@ -49,6 +49,15 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     /** @var bool */
     public $send_product_description = false;
 
+    /** @var string */
+    public $flexible_amount_max = '';
+
+    /** @var string */
+    public $flexible_amount_percentage = '';
+
+    /** @var string */
+    public $flexible_amount_fixed = '';
+
     /**
      * Constructor for the gateway.
      */
@@ -98,6 +107,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->debug              = 'yes' === $this->get_option( 'debug', 'no' );
         $this->payment_methods        = $this->get_option( 'payment_methods', array() );
         $this->send_product_description = 'yes' === $this->get_option( 'send_product_description', 'no' );
+        $this->flexible_amount_max        = $this->get_option( 'flexible_amount_max' );
+        $this->flexible_amount_percentage = $this->get_option( 'flexible_amount_percentage' );
+        $this->flexible_amount_fixed      = $this->get_option( 'flexible_amount_fixed' );
         
         // Logging
         $this->log = $this->debug ? wc_get_logger() : null;
@@ -221,6 +233,35 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'description' => __( 'When enabled, product names from the order will be sent as a description on the Breeze payment page. Useful for merchants who want customers to see a summary of their items on the Breeze checkout.', 'breeze-payment-gateway' ),
                 'default'     => 'no',
                 'desc_tip'    => true,
+            ),
+            'flexible_amount_section' => array(
+                'title'       => __( 'Flexible Amount (Crypto)', 'breeze-payment-gateway' ),
+                'type'        => 'title',
+                'description' => __( 'Configure a flexible deduction amount for crypto deposit payments. At least one of Percentage or Fixed Amount must be set to enable this feature.', 'breeze-payment-gateway' ),
+            ),
+            'flexible_amount_max' => array(
+                'title'             => __( 'Max Amount', 'breeze-payment-gateway' ),
+                'type'              => 'number',
+                'description'       => __( 'Maximum flexible deduction amount in minor units (e.g. 100 = $1.00). Leave blank to apply no cap.', 'breeze-payment-gateway' ),
+                'default'           => '',
+                'desc_tip'          => true,
+                'custom_attributes' => array( 'min' => '0', 'step' => '1' ),
+            ),
+            'flexible_amount_percentage' => array(
+                'title'             => __( 'Percentage', 'breeze-payment-gateway' ),
+                'type'              => 'number',
+                'description'       => __( 'Flexible deduction as a percentage of the base amount (0–100). Set this or Fixed Amount (or both) to enable flexible amount on crypto deposits.', 'breeze-payment-gateway' ),
+                'default'           => '',
+                'desc_tip'          => true,
+                'custom_attributes' => array( 'min' => '0', 'max' => '100', 'step' => '0.01' ),
+            ),
+            'flexible_amount_fixed' => array(
+                'title'             => __( 'Fixed Amount', 'breeze-payment-gateway' ),
+                'type'              => 'number',
+                'description'       => __( 'Fixed flexible deduction amount in minor units (e.g. 100 = $1.00). Set this or Percentage (or both) to enable flexible amount on crypto deposits.', 'breeze-payment-gateway' ),
+                'default'           => '',
+                'desc_tip'          => true,
+                'custom_attributes' => array( 'min' => '0', 'step' => '1' ),
             ),
         );
     }
@@ -534,6 +575,24 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             ),
             'customer'          => $customer,
         );
+
+        // Conditionally append flexibleAmount when at least one sub-field is configured.
+        // Only active for crypto deposit payment type (enforced server-side by Breeze).
+        $has_percentage = '' !== $this->flexible_amount_percentage && null !== $this->flexible_amount_percentage;
+        $has_fixed      = '' !== $this->flexible_amount_fixed && null !== $this->flexible_amount_fixed;
+        if ( $has_percentage || $has_fixed ) {
+            $flexible = array();
+            if ( '' !== $this->flexible_amount_max && null !== $this->flexible_amount_max ) {
+                $flexible['maxAmount'] = (int) $this->flexible_amount_max;
+            }
+            if ( $has_percentage ) {
+                $flexible['percentage'] = (float) $this->flexible_amount_percentage;
+            }
+            if ( $has_fixed ) {
+                $flexible['fixedAmount'] = (int) $this->flexible_amount_fixed;
+            }
+            $payment_data['flexibleAmount'] = $flexible;
+        }
 
         $response = $this->breeze_api_request( 'POST', '/v1/payment_pages', $payment_data );
 
@@ -1127,13 +1186,13 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Supported currencies. Breeze currently supports USD only.
-     * Override via filter: add_filter( 'breeze_supported_currencies', fn($c) => array_merge($c, ['EUR']) );
+     * Supported currencies. Breeze currently supports USD, EUR, SGD, and CAD.
+     * Override via filter: add_filter( 'breeze_supported_currencies', fn($c) => array_merge($c, ['GBP']) );
      *
      * @return array
      */
     private function get_supported_currencies() {
-        return apply_filters( 'breeze_supported_currencies', array( 'USD' ) );
+        return apply_filters( 'breeze_supported_currencies', array( 'USD', 'EUR', 'SGD', 'CAD' ) );
     }
 
     /**
