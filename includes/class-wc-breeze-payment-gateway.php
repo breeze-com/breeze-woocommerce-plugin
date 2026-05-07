@@ -267,6 +267,63 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
+     * Validate Max Amount: blank, or non-negative integer (minor units).
+     */
+    public function validate_flexible_amount_max_field( $key, $value ) {
+        return $this->validate_non_negative_integer_minor_units( $key, $value, __( 'Max Amount', 'breeze-payment-gateway' ) );
+    }
+
+    /**
+     * Validate Fixed Amount: blank, or non-negative integer (minor units).
+     */
+    public function validate_flexible_amount_fixed_field( $key, $value ) {
+        return $this->validate_non_negative_integer_minor_units( $key, $value, __( 'Fixed Amount', 'breeze-payment-gateway' ) );
+    }
+
+    /**
+     * Validate Percentage: blank, or number in [0, 100].
+     */
+    public function validate_flexible_amount_percentage_field( $key, $value ) {
+        $value = is_string( $value ) ? trim( $value ) : $value;
+        if ( '' === $value || null === $value ) {
+            return '';
+        }
+        if ( ! is_numeric( $value ) ) {
+            WC_Admin_Settings::add_error( __( 'Percentage must be a number between 0 and 100.', 'breeze-payment-gateway' ) );
+            return '';
+        }
+        $num = (float) $value;
+        if ( $num < 0 || $num > 100 ) {
+            WC_Admin_Settings::add_error( __( 'Percentage must be between 0 and 100.', 'breeze-payment-gateway' ) );
+            return '';
+        }
+        return (string) $num;
+    }
+
+    /**
+     * Shared validator for minor-unit integer fields (Max / Fixed Amount).
+     */
+    private function validate_non_negative_integer_minor_units( $key, $value, $label ) {
+        $value = is_string( $value ) ? trim( $value ) : $value;
+        if ( '' === $value || null === $value ) {
+            return '';
+        }
+        // Reject decimals — minor units are integers.
+        if ( ! is_numeric( $value ) || (string) (int) $value !== (string) $value ) {
+            /* translators: %s: field label */
+            WC_Admin_Settings::add_error( sprintf( __( '%s must be a non-negative whole number (minor units).', 'breeze-payment-gateway' ), $label ) );
+            return '';
+        }
+        $num = (int) $value;
+        if ( $num < 0 ) {
+            /* translators: %s: field label */
+            WC_Admin_Settings::add_error( sprintf( __( '%s must not be negative.', 'breeze-payment-gateway' ), $label ) );
+            return '';
+        }
+        return (string) $num;
+    }
+
+    /**
      * Payment form on checkout page
      */
     public function payment_fields() {
@@ -576,8 +633,8 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             'customer'          => $customer,
         );
 
-        // Conditionally append flexibleAmount when at least one sub-field is configured.
-        // Only active for crypto deposit payment type (enforced server-side by Breeze).
+        // Conditionally append settings.flexibleAmount when at least one sub-field is configured.
+        // Per spec, flexibleAmount lives under `settings` and is only honored for crypto deposit payments.
         $has_percentage = '' !== $this->flexible_amount_percentage && null !== $this->flexible_amount_percentage;
         $has_fixed      = '' !== $this->flexible_amount_fixed && null !== $this->flexible_amount_fixed;
         if ( $has_percentage || $has_fixed ) {
@@ -591,7 +648,10 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             if ( $has_fixed ) {
                 $flexible['fixedAmount'] = (int) $this->flexible_amount_fixed;
             }
-            $payment_data['flexibleAmount'] = $flexible;
+            if ( ! isset( $payment_data['settings'] ) ) {
+                $payment_data['settings'] = array();
+            }
+            $payment_data['settings']['flexibleAmount'] = $flexible;
         }
 
         $response = $this->breeze_api_request( 'POST', '/v1/payment_pages', $payment_data );

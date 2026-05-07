@@ -2291,13 +2291,16 @@ function items_total( $items ) {
     return $sum;
 }
 
-// ─── flexibleAmount helper (mirrors plugin logic) ────────────────────────────
+// ─── flexibleAmount helper (mirrors plugin block in create_breeze_payment_page) ──
+// Takes a base payment_data payload and applies settings.flexibleAmount under
+// the same conditions as the production code. Returns the (possibly modified)
+// payload so tests can assert on the exact structure sent to the API.
 
-function build_flexible_amount( $max, $percentage, $fixed ) {
+function apply_flexible_amount( array $payment_data, $max, $percentage, $fixed ) {
     $has_percentage = '' !== $percentage && null !== $percentage;
     $has_fixed      = '' !== $fixed && null !== $fixed;
     if ( ! $has_percentage && ! $has_fixed ) {
-        return null;
+        return $payment_data;
     }
     $flexible = array();
     if ( '' !== $max && null !== $max ) {
@@ -2309,50 +2312,73 @@ function build_flexible_amount( $max, $percentage, $fixed ) {
     if ( $has_fixed ) {
         $flexible['fixedAmount'] = (int) $fixed;
     }
-    return $flexible;
+    if ( ! isset( $payment_data['settings'] ) ) {
+        $payment_data['settings'] = array();
+    }
+    $payment_data['settings']['flexibleAmount'] = $flexible;
+    return $payment_data;
 }
 
 // ─── flexibleAmount tests ─────────────────────────────────────────────────────
 
 function test_flexible_amount_omitted_when_not_configured() {
     echo "\n🧪 flexibleAmount: omitted when no percentage or fixedAmount set\n";
-    $result = build_flexible_amount( '', '', '' );
-    assert_true( null === $result, 'flexibleAmount absent when all empty' );
-    $result2 = build_flexible_amount( '500', '', '' );
-    assert_true( null === $result2, 'flexibleAmount absent when only maxAmount set' );
+    $result = apply_flexible_amount( array(), '', '', '' );
+    assert_true( ! isset( $result['settings'] ), 'settings absent when all empty' );
+    $result2 = apply_flexible_amount( array(), '500', '', '' );
+    assert_true( ! isset( $result2['settings'] ), 'settings absent when only maxAmount set' );
 }
 
 function test_flexible_amount_percentage_only() {
-    echo "\n🧪 flexibleAmount: percentage only\n";
-    $result = build_flexible_amount( '', '5.5', '' );
-    assert_true( null !== $result, 'flexibleAmount present when percentage set' );
-    assert_true( isset( $result['percentage'] ), 'percentage key present' );
-    assert_equals( 5.5, $result['percentage'], 'percentage value correct' );
-    assert_true( ! isset( $result['maxAmount'] ), 'maxAmount absent when not set' );
-    assert_true( ! isset( $result['fixedAmount'] ), 'fixedAmount absent when not set' );
+    echo "\n🧪 flexibleAmount: percentage only (nested under settings)\n";
+    $result = apply_flexible_amount( array(), '', '5.5', '' );
+    assert_true( isset( $result['settings']['flexibleAmount'] ), 'settings.flexibleAmount present per API spec' );
+    $fa = $result['settings']['flexibleAmount'];
+    assert_true( isset( $fa['percentage'] ), 'percentage key present' );
+    assert_equals( 5.5, $fa['percentage'], 'percentage value correct' );
+    assert_true( ! isset( $fa['maxAmount'] ), 'maxAmount absent when not set' );
+    assert_true( ! isset( $fa['fixedAmount'] ), 'fixedAmount absent when not set' );
 }
 
 function test_flexible_amount_fixed_only() {
-    echo "\n🧪 flexibleAmount: fixedAmount only\n";
-    $result = build_flexible_amount( '', '', '200' );
-    assert_true( null !== $result, 'flexibleAmount present when fixedAmount set' );
-    assert_equals( 200, $result['fixedAmount'], 'fixedAmount value correct' );
-    assert_true( ! isset( $result['percentage'] ), 'percentage absent when not set' );
+    echo "\n🧪 flexibleAmount: fixedAmount only (nested under settings)\n";
+    $result = apply_flexible_amount( array(), '', '', '200' );
+    assert_true( isset( $result['settings']['flexibleAmount'] ), 'settings.flexibleAmount present' );
+    $fa = $result['settings']['flexibleAmount'];
+    assert_equals( 200, $fa['fixedAmount'], 'fixedAmount value correct' );
+    assert_true( ! isset( $fa['percentage'] ), 'percentage absent when not set' );
 }
 
 function test_flexible_amount_all_fields() {
-    echo "\n🧪 flexibleAmount: all three fields set\n";
-    $result = build_flexible_amount( '1000', '10', '500' );
-    assert_true( null !== $result, 'flexibleAmount present' );
-    assert_equals( 1000, $result['maxAmount'], 'maxAmount correct (minor units)' );
-    assert_equals( 10.0, $result['percentage'], 'percentage correct' );
-    assert_equals( 500, $result['fixedAmount'], 'fixedAmount correct (minor units)' );
+    echo "\n🧪 flexibleAmount: all three fields set (nested under settings)\n";
+    $result = apply_flexible_amount( array(), '1000', '10', '500' );
+    assert_true( isset( $result['settings']['flexibleAmount'] ), 'settings.flexibleAmount present' );
+    $fa = $result['settings']['flexibleAmount'];
+    assert_equals( 1000, $fa['maxAmount'], 'maxAmount correct (minor units)' );
+    assert_equals( 10.0, $fa['percentage'], 'percentage correct' );
+    assert_equals( 500, $fa['fixedAmount'], 'fixedAmount correct (minor units)' );
 }
 
 function test_flexible_amount_omitted_when_only_max_set() {
     echo "\n🧪 flexibleAmount: omitted when only maxAmount configured (needs percentage or fixedAmount)\n";
-    $result = build_flexible_amount( '999', '', '' );
-    assert_true( null === $result, 'flexibleAmount absent — maxAmount alone insufficient' );
+    $result = apply_flexible_amount( array(), '999', '', '' );
+    assert_true( ! isset( $result['settings'] ), 'settings absent — maxAmount alone insufficient' );
+}
+
+function test_flexible_amount_not_at_top_level() {
+    echo "\n🧪 flexibleAmount: NEVER appears at top level of payload (regression guard)\n";
+    $result = apply_flexible_amount( array( 'amount' => 1000 ), '', '5', '' );
+    assert_true( ! isset( $result['flexibleAmount'] ), 'top-level flexibleAmount absent (must be under settings)' );
+    assert_true( isset( $result['settings']['flexibleAmount'] ), 'flexibleAmount lives under settings' );
+}
+
+function test_flexible_amount_preserves_existing_settings() {
+    echo "\n🧪 flexibleAmount: merges into existing settings without clobbering\n";
+    $base = array( 'settings' => array( 'someOtherKey' => 'preserved' ) );
+    $result = apply_flexible_amount( $base, '', '', '300' );
+    assert_equals( 'preserved', $result['settings']['someOtherKey'], 'pre-existing settings keys preserved' );
+    assert_true( isset( $result['settings']['flexibleAmount'] ), 'flexibleAmount added alongside' );
+    assert_equals( 300, $result['settings']['flexibleAmount']['fixedAmount'], 'fixedAmount value correct' );
 }
 
 function test_discount_rounding_3_items_10_off() {
@@ -3008,6 +3034,8 @@ test_flexible_amount_percentage_only();
 test_flexible_amount_fixed_only();
 test_flexible_amount_all_fields();
 test_flexible_amount_omitted_when_only_max_set();
+test_flexible_amount_not_at_top_level();
+test_flexible_amount_preserves_existing_settings();
 
 // Run discount rounding tests
 test_discount_rounding_3_items_10_off();
