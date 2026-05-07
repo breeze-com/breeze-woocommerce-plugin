@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-05-08
+
+### Added
+- **Multi-currency support** — gateway is now available when the WooCommerce store currency is `USD`, `EUR`, `SGD`, or `CAD` (previously USD-only). The list remains overridable via the `breeze_supported_currencies` filter.
+- **Flexible Amount (Crypto) settings section** under WooCommerce → Settings → Payments → Breeze. Three configurable fields wired into the `/v1/payment_pages` payload as `settings.flexibleAmount`:
+  - `Max Amount` — optional cap on the deduction (minor units)
+  - `Percentage` — deduction as a percentage of the base amount (`(0, 100]`)
+  - `Fixed Amount` — fixed deduction (minor units)
+  - At least one of `Percentage` or `Fixed Amount` must be set for the object to be sent. Only honored by Breeze for crypto deposit payments.
+- **Server-side validation** for all three flexible-amount fields with strict-positive bounds (`> 0`) matching the Breeze API server enforcement; decimal cents rejected for `Max Amount` / `Fixed Amount` since they are minor-unit integers.
+
+### Changed
+- Updated `get_supported_currencies()` filter example to reflect the expanded default list.
+
+### Tests
+- Refactored `build_flexible_amount` test helper into `apply_flexible_amount` so tests assert on the wrapped payload structure (`settings.flexibleAmount`) rather than the inner object alone.
+- Added regression tests guarding against top-level `flexibleAmount` placement and verifying merge-behavior into existing `settings`.
+
+---
+
+## [1.1.1] - 2026-04-20
+
+### Added
+- **Constrain gateway icon to 24×24px** on the checkout payment methods list using the `woocommerce_gateway_icon` filter — keeps the Breeze logo consistently sized across themes.
+- **Product description toggle** — a new setting under WooCommerce → Settings → Payments → Breeze lets merchants optionally include product short descriptions in line items sent to the Breeze payment page (off by default).
+
+---
+
 ## [1.1.0] - 2026-04-13
 
 ### Changed

@@ -4,7 +4,7 @@ Tags: breeze, payments, payment gateway, woocommerce, checkout
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 1.0.2
+Stable tag: 1.2.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -152,6 +152,31 @@ Refunds must be processed in your Breeze dashboard.
 
 == Changelog ==
 
+= 1.2.0 =
+* Multi-currency support — gateway now available for EUR, SGD, and CAD in addition to USD
+* New "Flexible Amount (Crypto)" settings section — configure percentage and/or fixed-amount deduction (with optional cap) for crypto deposit payments
+* Server-side validation on flexible amount fields with strict-positive bounds matching the Breeze API
+* Filter `breeze_supported_currencies` still available to extend or override the supported currency list
+
+= 1.1.1 =
+* Constrain gateway icon to 24×24px on checkout (uses `woocommerce_gateway_icon` filter)
+* New "Send product description" setting — optionally include product short descriptions in payment-page line items (off by default)
+
+= 1.1.0 =
+* Migrate payment page creation to `lineItems` with `clientProductId` (Inline Products)
+* Customer data sent inline in the payment page request — eliminates separate customer creation round-trips
+* PHP 8 compatibility — explicit float casts on monetary calculations
+* Spec compliance in line-item construction (skip zero-amount items, truncate displayName/description, enforce 20-item limit)
+* Fix `RESOURCE_ALREADY_EXISTS` for returning customers
+* Docker dev setup auto-configures Breeze gateway settings from `.env`
+
+= 1.0.2 =
+* Setup script fixes for fresh installations
+
+= 1.0.1 =
+* Setup script fixes
+* README and development filter documentation updates
+
 = 1.0.0 =
 * Initial release
 * Breeze API integration
@@ -165,6 +190,15 @@ Refunds must be processed in your Breeze dashboard.
 * Debug logging
 
 == Upgrade Notice ==
+
+= 1.2.0 =
+Adds EUR/SGD/CAD currency support and a new Flexible Amount (Crypto) configuration section for crypto deposit payments.
+
+= 1.1.1 =
+Adds checkout icon sizing and an optional product-description toggle.
+
+= 1.1.0 =
+Major upgrade to inline lineItems and inline customer data. Recommended for all merchants.
 
 = 1.0.0 =
 Initial release.
