@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.1] - 2026-05-12
+
+### Fixed
+- **Modal rejected `pay.breeze.com` URLs.** The modal previously checked the iframe URL against a single host (`pay.breeze.cash`), so payment-page URLs returned on the `.com` host failed the host validation. Replaced with a base-domain allowlist — any subdomain of `breeze.cash` or `breeze.com` is now accepted. Match is dot-boundary safe (`evil-breeze.com` is still rejected).
+- **Cart not emptied when user dismisses modal after success.** If the customer pressed Escape or clicked the backdrop after seeing "Payment confirmed!" but before the iframe redirect to the success return URL landed (visible mainly on local testing where the redirect is blocked by mixed-content / Local Network Access), the modal closed without invoking `handle_return()`. The order was correctly marked paid by the webhook, but the customer's cart still contained the items. The modal now follows the token-protected success return URL on user-close-after-confirmed, so `handle_return()` runs and the cart clears.
+- **Legacy modal now also validates the payment-page URL host** before loading it into the iframe (previously enforced only on the Blocks variant).
+
+### Changed
+- Filter `breeze_modal_origin` (single host string) renamed to `breeze_payment_page_domains` (array of base domains). Default: `[ 'breeze.cash', 'breeze.com' ]`.
+- Localised JS data: `breezeOrigin` / `breezeHost` removed, replaced by `breezeDomains: string[]`.
+- The Blocks Store API redirect tag now exposes both `breeze_success_url` and `breeze_fail_url`; the legacy AJAX response exposes both `successUrl` and `failUrl`. Construction consolidated into `WC_Breeze_Modal_Checkout::build_return_url( $order, $status )`.
+
+---
+
 ## [2.0.0] - 2026-05-12
 
 ### Added

@@ -49,14 +49,50 @@ class WC_Breeze_Modal_Checkout {
     }
 
     /**
-     * Returns the Breeze gateway origin used for postMessage targeting and
-     * URL-host validation. Filterable so test/staging environments can point
-     * at a different host.
+     * Allowed base domains for the Breeze payment page. The Breeze API may
+     * return payment-page URLs on any subdomain of these domains (e.g.
+     * `pay.breeze.cash`, `pay.breeze.com`, `pay.staging.breeze.cash`), so we
+     * configure the trust boundary at the base-domain level. A URL is accepted
+     * when its hostname equals one of these domains exactly OR ends with
+     * `.` + one of these domains.
      *
-     * @return string e.g. "https://pay.breeze.cash"
+     * Filter `breeze_payment_page_domains` can extend or replace the defaults.
+     *
+     * @return string[] e.g. [ "breeze.cash", "breeze.com" ]
      */
-    public static function get_breeze_origin() {
-        return apply_filters( 'breeze_modal_origin', 'https://pay.breeze.cash' );
+    public static function get_payment_page_domains() {
+        $domains = apply_filters(
+            'breeze_payment_page_domains',
+            array( 'breeze.cash', 'breeze.com' )
+        );
+
+        if ( ! is_array( $domains ) ) {
+            $domains = array( (string) $domains );
+        }
+
+        $clean = array();
+        foreach ( $domains as $domain ) {
+            $domain = is_string( $domain ) ? trim( strtolower( $domain ) ) : '';
+            if ( '' === $domain ) {
+                continue;
+            }
+            // Strip a leading wildcard if someone passed "*.breeze.cash".
+            if ( 0 === strpos( $domain, '*.' ) ) {
+                $domain = substr( $domain, 2 );
+            }
+            // If a full URL was passed, extract the host.
+            if ( false !== strpos( $domain, '://' ) ) {
+                $parsed = wp_parse_url( $domain );
+                $domain = isset( $parsed['host'] ) ? strtolower( $parsed['host'] ) : '';
+            }
+            // Strip a leading dot ("." or "..breeze.cash") if any.
+            $domain = ltrim( $domain, '.' );
+            if ( '' !== $domain && ! in_array( $domain, $clean, true ) ) {
+                $clean[] = $domain;
+            }
+        }
+
+        return $clean;
     }
 
     /** @return WC_Breeze_Payment_Gateway|null */
@@ -127,9 +163,7 @@ class WC_Breeze_Modal_Checkout {
         $parsed      = wp_parse_url( $site_url );
         $site_domain = isset( $parsed['host'] ) ? $parsed['host'] : '';
 
-        $breeze_origin = self::get_breeze_origin();
-        $parsed_origin = wp_parse_url( $breeze_origin );
-        $breeze_host   = isset( $parsed_origin['host'] ) ? $parsed_origin['host'] : '';
+        $breeze_domains = self::get_payment_page_domains();
 
         wp_localize_script( $handle, 'breezeModalData', array(
             'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
@@ -137,10 +171,9 @@ class WC_Breeze_Modal_Checkout {
             'storeName'    => get_bloginfo( 'name' ),
             'currency'     => function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : '',
             'checkoutUrl'  => function_exists( 'wc_get_checkout_url' ) ? wc_get_checkout_url() : '',
-            'siteDomain'   => $site_domain,
-            'breezeOrigin' => $breeze_origin,
-            'breezeHost'   => $breeze_host,
-            'debug'        => (bool) ( defined( 'WP_DEBUG' ) && WP_DEBUG ),
+            'siteDomain'     => $site_domain,
+            'breezeDomains'  => $breeze_domains,
+            'debug'          => (bool) ( defined( 'WP_DEBUG' ) && WP_DEBUG ),
             'gatewayData'  => array(
                 'title'       => $gateway->get_title(),
                 'description' => $gateway->get_description(),
@@ -168,8 +201,9 @@ class WC_Breeze_Modal_Checkout {
             return $result;
         }
 
-        $result['breeze_modal']    = true;
-        $result['breeze_fail_url'] = $this->build_fail_return_url( $order );
+        $result['breeze_modal']       = true;
+        $result['breeze_success_url'] = $this->build_return_url( $order, 'success' );
+        $result['breeze_fail_url']    = $this->build_return_url( $order, 'failed' );
 
         // Mark this order as the session's pending modal order so the cancel
         // AJAX endpoint can verify ownership for guest checkouts. The Store API
@@ -182,11 +216,18 @@ class WC_Breeze_Modal_Checkout {
     }
 
     /**
-     * Reconstruct the same failReturnUrl that was sent to Breeze when the
+     * Reconstruct the same return URL that was sent to Breeze when the
      * payment page was created. Used by the JS modal to navigate to the
-     * token-protected handle_return() endpoint if the user closes the modal.
+     * token-protected handle_return() endpoint — for `success` when the
+     * customer dismisses the modal after a payment-confirmed postMessage
+     * but before the iframe redirect lands (e.g. mixed-content blocks on
+     * local testing), and for `failed` on user-initiated cancellation.
+     *
+     * @param WC_Order $order
+     * @param string   $status 'success' or 'failed'
+     * @return string
      */
-    private function build_fail_return_url( $order ) {
+    private function build_return_url( $order, $status ) {
         $token = $order->get_meta( '_breeze_return_token' );
         if ( ! $token ) {
             return '';
@@ -195,7 +236,7 @@ class WC_Breeze_Modal_Checkout {
             array(
                 'wc-api'   => 'breeze_return',
                 'order_id' => $order->get_id(),
-                'status'   => 'failed',
+                'status'   => $status,
                 'token'    => $token,
             ),
             home_url( '/' )
@@ -294,7 +335,8 @@ class WC_Breeze_Modal_Checkout {
         wp_send_json_success( array(
             'paymentUrl' => $result['url'],
             'orderId'    => (int) $order_id,
-            'failUrl'    => isset( $result['fail_return_url'] ) ? $result['fail_return_url'] : '',
+            'successUrl' => $this->build_return_url( $order, 'success' ),
+            'failUrl'    => $this->build_return_url( $order, 'failed' ),
         ) );
     }
 

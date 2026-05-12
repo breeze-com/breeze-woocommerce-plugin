@@ -2,7 +2,7 @@
 [![WooCommerce](https://img.shields.io/badge/WooCommerce-6.0%2B-purple.svg)](https://woocommerce.com/)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-blue.svg)](https://php.net/)
 [![Tests](https://img.shields.io/badge/tests-98%20passed%20(262%20assertions)-brightgreen.svg)](#testing)
-[![Version](https://img.shields.io/badge/version-2.0.0-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
+[![Version](https://img.shields.io/badge/version-2.0.1-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
 
 ![Breeze Payment Gateway](.github/images/banner_v2.png)
 

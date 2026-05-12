@@ -4,7 +4,7 @@ Tags: breeze, payments, payment gateway, woocommerce, checkout
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 2.0.0
+Stable tag: 2.0.1
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -153,6 +153,12 @@ Refunds must be processed in your Breeze dashboard.
 
 == Changelog ==
 
+= 2.0.1 =
+* Fix: modal now accepts payment-page URLs on any subdomain of `breeze.cash` or `breeze.com` (previously rejected `pay.breeze.com`)
+* Fix: cart is cleared when the customer dismisses the modal after a payment-confirmed event but before the iframe redirect lands — modal now follows the token-protected success return URL so `handle_return()` runs
+* Fix: legacy shortcode modal now also validates the payment-page URL host before loading the iframe
+* Filter renamed: `breeze_modal_origin` (single host) → `breeze_payment_page_domains` (array of base domains)
+
 = 2.0.0 =
 * New "Checkout Display" setting under WooCommerce → Settings → Payments → Breeze: choose between full-page redirect (default) or an embedded modal/lightbox checkout
 * Modal flow supports both WooCommerce Checkout Blocks and the legacy shortcode checkout, with Apple Pay cross-domain support, 3DS auto-expansion, postMessage success overlay, and a nonce-protected cancellation path
@@ -198,6 +204,9 @@ Refunds must be processed in your Breeze dashboard.
 * Debug logging
 
 == Upgrade Notice ==
+
+= 2.0.1 =
+Fixes modal rejecting `pay.breeze.com` URLs and the cart not being emptied when the customer dismisses the modal after payment confirmation. Recommended for all merchants on 2.0.0.
 
 = 2.0.0 =
 Adds an optional modal/lightbox checkout (default remains full-page redirect, so no behaviour change on upgrade). Folds in the standalone Breeze Modal Addon — uninstall it after upgrading.

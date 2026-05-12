@@ -38,14 +38,49 @@
     var pollTimer        = null;
     var iframeEl         = null;
     var overlayEl        = null;
-    var currentOrderId   = null;
-    var paymentConfirmed = false;
+    var currentOrderId    = null;
+    var currentSuccessUrl = '';
+    var paymentConfirmed  = false;
 
-    function getBreezeHost()   { return ( data.breezeHost   || '' ).toLowerCase(); }
-    function getBreezeOrigin() { return ( data.breezeOrigin || '' ).replace( /\/$/, '' ); }
+    function getBreezeDomains() {
+        return Array.isArray( data.breezeDomains ) ? data.breezeDomains : [];
+    }
+
+    /**
+     * True if `host` is exactly one of the configured Breeze base domains,
+     * or a subdomain of one (matched on a dot boundary so `evilbreeze.com`
+     * is rejected when `breeze.com` is allowed).
+     */
+    function hostIsAllowed( host ) {
+        if ( ! host ) return false;
+        var lower = String( host ).toLowerCase();
+        var allowed = getBreezeDomains();
+        for ( var i = 0; i < allowed.length; i++ ) {
+            var base = String( allowed[ i ] ).toLowerCase();
+            if ( ! base ) continue;
+            if ( lower === base || lower.endsWith( '.' + base ) ) return true;
+        }
+        return false;
+    }
+
+    function isBreezePaymentUrl( url ) {
+        if ( ! url ) return false;
+        try {
+            var parsed = new URL( url, window.location.href );
+            return hostIsAllowed( parsed.hostname );
+        } catch ( e ) {
+            return false;
+        }
+    }
 
     function isBreezeOrigin( origin ) {
-        return !! origin && origin.toLowerCase() === getBreezeOrigin().toLowerCase();
+        if ( ! origin ) return false;
+        try {
+            var parsed = new URL( origin );
+            return hostIsAllowed( parsed.hostname );
+        } catch ( e ) {
+            return false;
+        }
     }
 
     /* ── Init ────────────────────────────────────────────── */
@@ -123,10 +158,16 @@
                     showError( msg );
                     return;
                 }
-                var paymentUrl = response.data.paymentUrl;
-                currentOrderId = response.data.orderId || null;
+                var paymentUrl    = response.data.paymentUrl;
+                currentOrderId    = response.data.orderId || null;
+                currentSuccessUrl = response.data.successUrl || '';
                 if ( ! paymentUrl ) {
                     showError( 'No payment URL returned. Please try again.' );
+                    return;
+                }
+                if ( ! isBreezePaymentUrl( paymentUrl ) ) {
+                    log( 'Refusing to load non-Breeze payment URL', paymentUrl );
+                    showError( 'Unexpected payment URL received. Please try again.' );
                     return;
                 }
                 openModal( paymentUrl );
@@ -354,6 +395,17 @@
 
         var userClose = ( reason === 'user-close' || reason === 'user-cancel' || reason === 'backdrop' || reason === 'escape' );
         if ( userClose ) {
+            // Payment already succeeded server-side — follow the token-protected
+            // success return URL so handle_return() empties the cart and lands
+            // on the thank-you page. This is the same path the iframe redirect
+            // would have taken; we just trigger it from the top window because
+            // the iframe redirect was blocked (e.g. https → http downgrade on
+            // local testing) or the user pressed Escape before it landed.
+            if ( paymentConfirmed && currentSuccessUrl ) {
+                if ( iframeEl ) iframeEl.src = 'about:blank';
+                window.location.href = currentSuccessUrl;
+                return;
+            }
             cancelOrderAndReturnToCheckout();
             return;
         }
