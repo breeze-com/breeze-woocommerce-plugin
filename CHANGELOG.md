@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.0] - 2026-05-12
+
+### Added
+- **Optional modal/lightbox checkout** via a new `Checkout Display` setting under WooCommerce → Settings → Payments → Breeze. Default remains `Redirect to Breeze (Recommended)`; `Open in a modal` embeds the Breeze payment page in a lightbox on the checkout page without a full-page navigation.
+- Modal flow supports both the **WooCommerce Checkout Blocks** (via a `fetch()` intercept on the Store API checkout response) and the **legacy shortcode** checkout (via the `checkout_place_order_breeze_payment_gateway` event + a nonce-protected `breeze_create_modal_payment` admin-ajax action).
+- Apple Pay cross-domain support in modal mode (passes `cross_domain_name` to the Breeze iframe and responds to the `request-global-config` postMessage).
+- 3DS auto-expansion, "Payment confirmed" overlay on success postMessage events, subtle shake animation on validation errors.
+- **Public gateway API**: `WC_Breeze_Payment_Gateway::create_payment_for_order( WC_Order $order )` returns `{ url, id, fail_return_url }` or `WP_Error`. Consumed by both `process_payment()` and the modal integration. Replaces the standalone addon's reflection-into-private-methods workaround.
+- New `breeze_modal_origin` filter (defaults to `https://pay.breeze.cash`) for staging environments that need to talk to a different Breeze host.
+
+### Changed
+- Folds the previously standalone `breeze-woocommerce-modal-addon` plugin into the main plugin — one install, one settings page.
+- `create_breeze_payment_page()` now surfaces the constructed `fail_return_url` on its return value so callers can route the customer to the existing token-protected `handle_return()` endpoint.
+
+### Security
+- Modal `postMessage` traffic validates `event.origin` inbound and targets `event.origin` outbound (no `'*'`).
+- Breeze URL matching parses with `new URL()` and compares hostnames — substring matches like `indexOf('breeze.cash')` are gone.
+- Removed the global `Location.prototype.href` setter override and its 120 s cleanup timer that the standalone addon shipped.
+- Removed the unauthenticated `?breeze_payment=` query-string handler that could grief a customer's draft order via a shared link.
+- User-cancel path is a nonce-bound, ownership-checked `breeze_cancel_modal_payment` admin-ajax endpoint.
+- Failure recovery reuses the existing `_breeze_return_token` flow instead of inferring success/failure from same-origin URL paths.
+
+---
+
 ## [1.2.0] - 2026-05-08
 
 ### Added
