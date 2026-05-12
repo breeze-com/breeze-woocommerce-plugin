@@ -4,7 +4,7 @@
 [![Tests](https://img.shields.io/badge/tests-98%20passed%20(262%20assertions)-brightgreen.svg)](#testing)
 [![Version](https://img.shields.io/badge/version-2.0.0-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
 
-![Breeze Payment Gateway](.github/images/banner-v2.png)
+![Breeze Payment Gateway](.github/images/banner_v2.png)
 
 ## Features
 
