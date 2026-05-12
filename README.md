@@ -12,6 +12,7 @@
 - ✅ Automatic customer creation in Breeze
 - ✅ Inline product format — no pre-registration needed
 - ✅ Secure payment page redirects with one-time return tokens
+- ✅ Optional modal/lightbox checkout — embed the Breeze payment page on your checkout page (Blocks + legacy, Apple Pay cross-domain)
 - ✅ Webhook support with HMAC SHA256 signature verification
 - ✅ Refunds (partial + full) via Breeze API
 - ✅ Discount/coupon support — discounted prices sent automatically
