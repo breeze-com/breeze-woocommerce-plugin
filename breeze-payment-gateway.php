@@ -57,13 +57,24 @@ function breeze_add_payment_gateway( $gateways ) {
  */
 add_action( 'plugins_loaded', 'breeze_payment_gateway_init', 11 );
 function breeze_payment_gateway_init() {
-    
+
     // Load plugin textdomain
     load_plugin_textdomain( 'breeze-payment-gateway', false, dirname( BREEZE_PAYMENT_GATEWAY_PLUGIN_BASENAME ) . '/languages' );
-    
+
     // Include the gateway class
-    if ( class_exists( 'WC_Payment_Gateway' ) ) {
-        require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-payment-gateway.php';
+    if ( ! class_exists( 'WC_Payment_Gateway' ) ) {
+        return;
+    }
+    require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-payment-gateway.php';
+
+    // Conditionally bootstrap the modal checkout integration. Reading the
+    // option directly avoids instantiating the gateway here — WooCommerce
+    // does that lazily via the payment_gateways filter.
+    $settings = get_option( 'woocommerce_breeze_payment_gateway_settings', array() );
+    $display  = isset( $settings['checkout_display'] ) ? $settings['checkout_display'] : 'redirect';
+    if ( 'modal' === $display ) {
+        require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-modal-checkout.php';
+        WC_Breeze_Modal_Checkout::instance();
     }
 }
 
