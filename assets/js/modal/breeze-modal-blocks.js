@@ -40,16 +40,23 @@
     var currentFailUrl   = '';
 
     /* ── Origin + URL helpers ────────────────────────────── */
-    function getBreezeHosts() {
-        return Array.isArray( data.breezeHosts ) ? data.breezeHosts : [];
+    function getBreezeDomains() {
+        return Array.isArray( data.breezeDomains ) ? data.breezeDomains : [];
     }
 
+    /**
+     * True if `host` is exactly one of the configured Breeze base domains,
+     * or a subdomain of one (matched on a dot boundary so `evilbreeze.com`
+     * is rejected when `breeze.com` is allowed).
+     */
     function hostIsAllowed( host ) {
         if ( ! host ) return false;
-        var lower = host.toLowerCase();
-        var allowed = getBreezeHosts();
+        var lower = String( host ).toLowerCase();
+        var allowed = getBreezeDomains();
         for ( var i = 0; i < allowed.length; i++ ) {
-            if ( lower === String( allowed[ i ] ).toLowerCase() ) return true;
+            var base = String( allowed[ i ] ).toLowerCase();
+            if ( ! base ) continue;
+            if ( lower === base || lower.endsWith( '.' + base ) ) return true;
         }
         return false;
     }

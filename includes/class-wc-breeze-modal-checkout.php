@@ -49,40 +49,46 @@ class WC_Breeze_Modal_Checkout {
     }
 
     /**
-     * Allowed hostnames for the Breeze payment page. The Breeze API may return
-     * payment-page URLs on either of these hosts (and a staging environment
-     * could legitimately use a different one), so we accept a list rather than
-     * a single value. The JS modal uses this list to validate the URL host
-     * before loading it into an iframe and to gate inbound/outbound postMessage
-     * traffic against trusted origins.
+     * Allowed base domains for the Breeze payment page. The Breeze API may
+     * return payment-page URLs on any subdomain of these domains (e.g.
+     * `pay.breeze.cash`, `pay.breeze.com`, `pay.staging.breeze.cash`), so we
+     * configure the trust boundary at the base-domain level. A URL is accepted
+     * when its hostname equals one of these domains exactly OR ends with
+     * `.` + one of these domains.
      *
-     * Filter `breeze_payment_page_hosts` can extend or replace the defaults.
+     * Filter `breeze_payment_page_domains` can extend or replace the defaults.
      *
-     * @return string[] e.g. [ "pay.breeze.cash", "pay.breeze.com" ]
+     * @return string[] e.g. [ "breeze.cash", "breeze.com" ]
      */
-    public static function get_payment_page_hosts() {
-        $hosts = apply_filters(
-            'breeze_payment_page_hosts',
-            array( 'pay.breeze.cash', 'pay.breeze.com' )
+    public static function get_payment_page_domains() {
+        $domains = apply_filters(
+            'breeze_payment_page_domains',
+            array( 'breeze.cash', 'breeze.com' )
         );
 
-        if ( ! is_array( $hosts ) ) {
-            $hosts = array( (string) $hosts );
+        if ( ! is_array( $domains ) ) {
+            $domains = array( (string) $domains );
         }
 
         $clean = array();
-        foreach ( $hosts as $host ) {
-            $host = is_string( $host ) ? trim( strtolower( $host ) ) : '';
-            if ( '' === $host ) {
+        foreach ( $domains as $domain ) {
+            $domain = is_string( $domain ) ? trim( strtolower( $domain ) ) : '';
+            if ( '' === $domain ) {
                 continue;
             }
-            // If a full URL was passed, extract the host.
-            if ( false !== strpos( $host, '://' ) ) {
-                $parsed = wp_parse_url( $host );
-                $host   = isset( $parsed['host'] ) ? strtolower( $parsed['host'] ) : '';
+            // Strip a leading wildcard if someone passed "*.breeze.cash".
+            if ( 0 === strpos( $domain, '*.' ) ) {
+                $domain = substr( $domain, 2 );
             }
-            if ( '' !== $host && ! in_array( $host, $clean, true ) ) {
-                $clean[] = $host;
+            // If a full URL was passed, extract the host.
+            if ( false !== strpos( $domain, '://' ) ) {
+                $parsed = wp_parse_url( $domain );
+                $domain = isset( $parsed['host'] ) ? strtolower( $parsed['host'] ) : '';
+            }
+            // Strip a leading dot ("." or "..breeze.cash") if any.
+            $domain = ltrim( $domain, '.' );
+            if ( '' !== $domain && ! in_array( $domain, $clean, true ) ) {
+                $clean[] = $domain;
             }
         }
 
@@ -157,7 +163,7 @@ class WC_Breeze_Modal_Checkout {
         $parsed      = wp_parse_url( $site_url );
         $site_domain = isset( $parsed['host'] ) ? $parsed['host'] : '';
 
-        $breeze_hosts = self::get_payment_page_hosts();
+        $breeze_domains = self::get_payment_page_domains();
 
         wp_localize_script( $handle, 'breezeModalData', array(
             'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
@@ -165,9 +171,9 @@ class WC_Breeze_Modal_Checkout {
             'storeName'    => get_bloginfo( 'name' ),
             'currency'     => function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : '',
             'checkoutUrl'  => function_exists( 'wc_get_checkout_url' ) ? wc_get_checkout_url() : '',
-            'siteDomain'   => $site_domain,
-            'breezeHosts'  => $breeze_hosts,
-            'debug'        => (bool) ( defined( 'WP_DEBUG' ) && WP_DEBUG ),
+            'siteDomain'     => $site_domain,
+            'breezeDomains'  => $breeze_domains,
+            'debug'          => (bool) ( defined( 'WP_DEBUG' ) && WP_DEBUG ),
             'gatewayData'  => array(
                 'title'       => $gateway->get_title(),
                 'description' => $gateway->get_description(),
