@@ -201,8 +201,9 @@ class WC_Breeze_Modal_Checkout {
             return $result;
         }
 
-        $result['breeze_modal']    = true;
-        $result['breeze_fail_url'] = $this->build_fail_return_url( $order );
+        $result['breeze_modal']       = true;
+        $result['breeze_success_url'] = $this->build_return_url( $order, 'success' );
+        $result['breeze_fail_url']    = $this->build_return_url( $order, 'failed' );
 
         // Mark this order as the session's pending modal order so the cancel
         // AJAX endpoint can verify ownership for guest checkouts. The Store API
@@ -215,11 +216,18 @@ class WC_Breeze_Modal_Checkout {
     }
 
     /**
-     * Reconstruct the same failReturnUrl that was sent to Breeze when the
+     * Reconstruct the same return URL that was sent to Breeze when the
      * payment page was created. Used by the JS modal to navigate to the
-     * token-protected handle_return() endpoint if the user closes the modal.
+     * token-protected handle_return() endpoint — for `success` when the
+     * customer dismisses the modal after a payment-confirmed postMessage
+     * but before the iframe redirect lands (e.g. mixed-content blocks on
+     * local testing), and for `failed` on user-initiated cancellation.
+     *
+     * @param WC_Order $order
+     * @param string   $status 'success' or 'failed'
+     * @return string
      */
-    private function build_fail_return_url( $order ) {
+    private function build_return_url( $order, $status ) {
         $token = $order->get_meta( '_breeze_return_token' );
         if ( ! $token ) {
             return '';
@@ -228,7 +236,7 @@ class WC_Breeze_Modal_Checkout {
             array(
                 'wc-api'   => 'breeze_return',
                 'order_id' => $order->get_id(),
-                'status'   => 'failed',
+                'status'   => $status,
                 'token'    => $token,
             ),
             home_url( '/' )
@@ -327,7 +335,8 @@ class WC_Breeze_Modal_Checkout {
         wp_send_json_success( array(
             'paymentUrl' => $result['url'],
             'orderId'    => (int) $order_id,
-            'failUrl'    => isset( $result['fail_return_url'] ) ? $result['fail_return_url'] : '',
+            'successUrl' => $this->build_return_url( $order, 'success' ),
+            'failUrl'    => $this->build_return_url( $order, 'failed' ),
         ) );
     }
 

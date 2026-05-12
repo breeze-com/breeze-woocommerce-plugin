@@ -31,13 +31,14 @@
     }
 
     /* ── State ───────────────────────────────────────────── */
-    var modalOpen        = false;
-    var pollTimer        = null;
-    var iframeEl         = null;
-    var overlayEl        = null;
-    var paymentConfirmed = false;
-    var currentOrderId   = null;
-    var currentFailUrl   = '';
+    var modalOpen         = false;
+    var pollTimer         = null;
+    var iframeEl          = null;
+    var overlayEl         = null;
+    var paymentConfirmed  = false;
+    var currentOrderId    = null;
+    var currentSuccessUrl = '';
+    var currentFailUrl    = '';
 
     /* ── Origin + URL helpers ────────────────────────────── */
     function getBreezeDomains() {
@@ -114,8 +115,9 @@
 
                     log( 'Breeze redirect captured', redirectUrl );
 
-                    currentOrderId = data.order_id || null;
-                    currentFailUrl = pr.breeze_fail_url || '';
+                    currentOrderId    = data.order_id || null;
+                    currentSuccessUrl = pr.breeze_success_url || '';
+                    currentFailUrl    = pr.breeze_fail_url || '';
 
                     openModal( redirectUrl );
 
@@ -369,6 +371,17 @@
         var userClose = ( reason === 'user-close' || reason === 'user-cancel' || reason === 'backdrop' || reason === 'escape' );
 
         if ( userClose ) {
+            // Payment already succeeded server-side — follow the token-protected
+            // success return URL so handle_return() empties the cart and lands
+            // on the thank-you page. This is the same path the iframe redirect
+            // would have taken; we just trigger it from the top window because
+            // the iframe redirect was blocked (e.g. https → http downgrade on
+            // local testing) or the user pressed Escape before it landed.
+            if ( paymentConfirmed && currentSuccessUrl ) {
+                if ( iframeEl ) iframeEl.src = 'about:blank';
+                window.location.href = currentSuccessUrl;
+                return;
+            }
             cancelOrderAndReturnToCheckout();
             return;
         }

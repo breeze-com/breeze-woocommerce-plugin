@@ -38,8 +38,9 @@
     var pollTimer        = null;
     var iframeEl         = null;
     var overlayEl        = null;
-    var currentOrderId   = null;
-    var paymentConfirmed = false;
+    var currentOrderId    = null;
+    var currentSuccessUrl = '';
+    var paymentConfirmed  = false;
 
     function getBreezeDomains() {
         return Array.isArray( data.breezeDomains ) ? data.breezeDomains : [];
@@ -157,8 +158,9 @@
                     showError( msg );
                     return;
                 }
-                var paymentUrl = response.data.paymentUrl;
-                currentOrderId = response.data.orderId || null;
+                var paymentUrl    = response.data.paymentUrl;
+                currentOrderId    = response.data.orderId || null;
+                currentSuccessUrl = response.data.successUrl || '';
                 if ( ! paymentUrl ) {
                     showError( 'No payment URL returned. Please try again.' );
                     return;
@@ -393,6 +395,17 @@
 
         var userClose = ( reason === 'user-close' || reason === 'user-cancel' || reason === 'backdrop' || reason === 'escape' );
         if ( userClose ) {
+            // Payment already succeeded server-side — follow the token-protected
+            // success return URL so handle_return() empties the cart and lands
+            // on the thank-you page. This is the same path the iframe redirect
+            // would have taken; we just trigger it from the top window because
+            // the iframe redirect was blocked (e.g. https → http downgrade on
+            // local testing) or the user pressed Escape before it landed.
+            if ( paymentConfirmed && currentSuccessUrl ) {
+                if ( iframeEl ) iframeEl.src = 'about:blank';
+                window.location.href = currentSuccessUrl;
+                return;
+            }
             cancelOrderAndReturnToCheckout();
             return;
         }
