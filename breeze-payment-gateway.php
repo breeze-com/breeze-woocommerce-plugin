@@ -3,7 +3,7 @@
  * Plugin Name: Breeze
  * Plugin URI: https://breeze.com
  * Description: Accept payments through Breeze payment gateway for WooCommerce
- * Version: 1.2.0
+ * Version: 2.0.0
  * Author: Breeze
  * Author URI: https://breeze.com
  * Text Domain: breeze-payment-gateway
@@ -24,7 +24,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Define plugin constants
-define( 'BREEZE_PAYMENT_GATEWAY_VERSION', '1.0.2' );
+define( 'BREEZE_PAYMENT_GATEWAY_VERSION', '2.0.0' );
 define( 'BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'BREEZE_PAYMENT_GATEWAY_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'BREEZE_PAYMENT_GATEWAY_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
@@ -57,13 +57,24 @@ function breeze_add_payment_gateway( $gateways ) {
  */
 add_action( 'plugins_loaded', 'breeze_payment_gateway_init', 11 );
 function breeze_payment_gateway_init() {
-    
+
     // Load plugin textdomain
     load_plugin_textdomain( 'breeze-payment-gateway', false, dirname( BREEZE_PAYMENT_GATEWAY_PLUGIN_BASENAME ) . '/languages' );
-    
+
     // Include the gateway class
-    if ( class_exists( 'WC_Payment_Gateway' ) ) {
-        require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-payment-gateway.php';
+    if ( ! class_exists( 'WC_Payment_Gateway' ) ) {
+        return;
+    }
+    require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-payment-gateway.php';
+
+    // Conditionally bootstrap the modal checkout integration. Reading the
+    // option directly avoids instantiating the gateway here — WooCommerce
+    // does that lazily via the payment_gateways filter.
+    $settings = get_option( 'woocommerce_breeze_payment_gateway_settings', array() );
+    $display  = isset( $settings['checkout_display'] ) ? $settings['checkout_display'] : 'redirect';
+    if ( 'modal' === $display ) {
+        require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-modal-checkout.php';
+        WC_Breeze_Modal_Checkout::instance();
     }
 }
 

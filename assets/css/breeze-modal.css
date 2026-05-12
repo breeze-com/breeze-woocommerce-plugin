@@ -1,0 +1,317 @@
+/**
+ * Breeze Modal Checkout — shared styles for both Blocks and legacy variants.
+ */
+
+#breeze-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 999999;
+    align-items: center;
+    justify-content: center;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+#breeze-modal-overlay.is-open {
+    display: flex;
+}
+
+.breeze-modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    animation: breeze-fade-in 0.25s ease forwards;
+}
+
+.breeze-modal-container {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    width: min(90vw, 520px);
+    max-height: 92vh;
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, 0.22), 0 4px 16px rgba(0, 0, 0, 0.12);
+    overflow: hidden;
+    animation: breeze-slide-up 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.breeze-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 20px;
+    border-bottom: 1px solid #f0f0f0;
+    background: #fafafa;
+    flex-shrink: 0;
+}
+
+.breeze-modal-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.breeze-modal-lock-icon {
+    width: 32px;
+    height: 32px;
+    background: #e8f5e9;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #2e7d32;
+    flex-shrink: 0;
+}
+
+.breeze-modal-lock-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.breeze-modal-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a1a1a;
+    line-height: 1;
+}
+
+.breeze-modal-store {
+    font-size: 12px;
+    color: #888;
+    line-height: 1;
+    padding-left: 2px;
+}
+
+.breeze-modal-close {
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: #f0f0f0;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #555;
+    transition: background 0.15s, color 0.15s;
+    flex-shrink: 0;
+    padding: 0;
+}
+
+.breeze-modal-close:hover {
+    background: #e0e0e0;
+    color: #111;
+}
+
+.breeze-modal-close svg {
+    width: 16px;
+    height: 16px;
+}
+
+.breeze-modal-body {
+    position: relative;
+    flex: 1;
+    min-height: 440px;
+    overflow: hidden;
+}
+
+.breeze-modal-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: #fff;
+    z-index: 2;
+}
+
+.breeze-modal-loading p {
+    font-size: 14px;
+    color: #888;
+    margin: 0;
+}
+
+.breeze-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid #e8e8e8;
+    border-top-color: #1a73e8;
+    border-radius: 50%;
+    animation: breeze-spin 0.75s linear infinite;
+}
+
+.breeze-modal-iframe {
+    width: 100%;
+    height: 100%;
+    border: none;
+    display: block;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+    min-height: 440px;
+}
+
+.breeze-modal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 20px;
+    border-top: 1px solid #f0f0f0;
+    background: #fafafa;
+    flex-shrink: 0;
+    gap: 12px;
+}
+
+.breeze-modal-security-badges {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.breeze-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #666;
+    font-weight: 500;
+}
+
+.breeze-modal-cancel {
+    border: none;
+    background: none;
+    font-size: 12px;
+    color: #999;
+    cursor: pointer;
+    padding: 4px 0;
+    text-decoration: underline;
+    white-space: nowrap;
+    transition: color 0.15s;
+}
+
+.breeze-modal-cancel:hover {
+    color: #555;
+}
+
+body.breeze-modal-active {
+    overflow: hidden;
+}
+
+.breeze-modal-container.is-3ds {
+    width: min(95vw, 600px);
+    max-height: 98vh;
+}
+
+.breeze-modal-container.is-3ds .breeze-modal-iframe {
+    min-height: 600px;
+}
+
+.breeze-modal-container.is-shaking {
+    animation: breeze-shake 0.45s ease;
+}
+
+.breeze-payment-confirmed {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(255, 255, 255, 0.96);
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.breeze-payment-confirmed.is-visible {
+    opacity: 1;
+}
+
+.breeze-confirm-icon {
+    width: 56px;
+    height: 56px;
+    background: #e8f5e9;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #2e7d32;
+    animation: breeze-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.breeze-confirm-icon svg {
+    width: 28px;
+    height: 28px;
+}
+
+.breeze-payment-confirmed p {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+.breeze-confirm-sub {
+    font-size: 13px !important;
+    font-weight: 400 !important;
+    color: #888 !important;
+}
+
+.breeze-modal-close:disabled,
+.breeze-modal-cancel:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+@keyframes breeze-fade-in {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+
+@keyframes breeze-slide-up {
+    from { opacity: 0; transform: translateY(24px) scale(0.97); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes breeze-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes breeze-pop {
+    from { transform: scale(0.6); opacity: 0; }
+    to   { transform: scale(1);   opacity: 1; }
+}
+
+@keyframes breeze-shake {
+    0%, 100% { transform: translateX(0); }
+    15%      { transform: translateX(-6px); }
+    30%      { transform: translateX(5px); }
+    45%      { transform: translateX(-4px); }
+    60%      { transform: translateX(3px); }
+    75%      { transform: translateX(-2px); }
+}
+
+@media (max-width: 540px) {
+    .breeze-modal-container {
+        width: 100%;
+        max-height: 100%;
+        height: 100%;
+        border-radius: 0;
+    }
+    #breeze-modal-overlay.is-open {
+        align-items: flex-end;
+    }
+    .breeze-modal-footer {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+}

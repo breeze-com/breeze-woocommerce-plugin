@@ -4,7 +4,7 @@ Tags: breeze, payments, payment gateway, woocommerce, checkout
 Requires at least: 5.8
 Tested up to: 6.5
 Requires PHP: 7.4
-Stable tag: 1.2.0
+Stable tag: 2.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -22,6 +22,7 @@ Features:
 * Automatic customer creation in Breeze
 * Dynamic product creation for orders
 * Secure payment page redirects
+* Optional modal/lightbox checkout — embed the Breeze payment page on your checkout page (supports legacy and WooCommerce Blocks checkout)
 * Webhook support for payment notifications
 * Test mode and live mode support
 * HPOS (High-Performance Order Storage) compatible
@@ -152,6 +153,13 @@ Refunds must be processed in your Breeze dashboard.
 
 == Changelog ==
 
+= 2.0.0 =
+* New "Checkout Display" setting under WooCommerce → Settings → Payments → Breeze: choose between full-page redirect (default) or an embedded modal/lightbox checkout
+* Modal flow supports both WooCommerce Checkout Blocks and the legacy shortcode checkout, with Apple Pay cross-domain support, 3DS auto-expansion, postMessage success overlay, and a nonce-protected cancellation path
+* Folds the previously separate `breeze-woocommerce-modal-addon` into the main plugin — no second install required
+* Gateway exposes a new public `create_payment_for_order( WC_Order )` API consumed by both the redirect and modal flows
+* Security and robustness improvements over the standalone addon: origin-validated postMessage, hostname-parsed URL matching, removal of global `Location.prototype.href` overrides, token-protected failure recovery, ownership-checked cancel endpoint
+
 = 1.2.0 =
 * Multi-currency support — gateway now available for EUR, SGD, and CAD in addition to USD
 * New "Flexible Amount (Crypto)" settings section — configure percentage and/or fixed-amount deduction (with optional cap) for crypto deposit payments
@@ -190,6 +198,9 @@ Refunds must be processed in your Breeze dashboard.
 * Debug logging
 
 == Upgrade Notice ==
+
+= 2.0.0 =
+Adds an optional modal/lightbox checkout (default remains full-page redirect, so no behaviour change on upgrade). Folds in the standalone Breeze Modal Addon — uninstall it after upgrading.
 
 = 1.2.0 =
 Adds EUR/SGD/CAD currency support and a new Flexible Amount (Crypto) configuration section for crypto deposit payments.

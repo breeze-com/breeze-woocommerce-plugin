@@ -58,6 +58,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     /** @var string */
     public $flexible_amount_fixed = '';
 
+    /** @var string 'redirect' or 'modal' */
+    public $checkout_display = 'redirect';
+
     /**
      * Constructor for the gateway.
      */
@@ -110,6 +113,8 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->flexible_amount_max        = $this->get_option( 'flexible_amount_max' );
         $this->flexible_amount_percentage = $this->get_option( 'flexible_amount_percentage' );
         $this->flexible_amount_fixed      = $this->get_option( 'flexible_amount_fixed' );
+        $checkout_display                 = $this->get_option( 'checkout_display', 'redirect' );
+        $this->checkout_display           = ( 'modal' === $checkout_display ) ? 'modal' : 'redirect';
         
         // Logging
         $this->log = $this->debug ? wc_get_logger() : null;
@@ -168,6 +173,21 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'description' => __( 'Payment method description that the customer will see on your checkout.', 'breeze-payment-gateway' ),
                 'default'     => __( 'Pay securely using Breeze payment gateway.', 'breeze-payment-gateway' ),
                 'desc_tip'    => true,
+            ),
+            'checkout_display' => array(
+                'title'       => __( 'Checkout Display', 'breeze-payment-gateway' ),
+                'type'        => 'select',
+                'description' => sprintf(
+                    /* translators: %s: URL to Breeze embedding iframe guidelines */
+                    __( '<strong>Note:</strong> When using Modal, Apple Pay requires additional domain certification. See <a href="%s" target="_blank" rel="noopener noreferrer">Enabling Apple Pay on an embedded iframe</a> for setup instructions.', 'breeze-payment-gateway' ),
+                    'https://docs.breeze.com/docs/embedding-iframe-guidelines#enabling-apple-pay-on-an-embedded-iframe'
+                ),
+                'default'     => 'redirect',
+                'desc_tip'    => false,
+                'options'     => array(
+                    'redirect' => __( 'Redirect to Breeze (Recommended)', 'breeze-payment-gateway' ),
+                    'modal'    => __( 'Open in a modal', 'breeze-payment-gateway' ),
+                ),
             ),
             'testmode' => array(
                 'title'       => __( 'Test Mode', 'breeze-payment-gateway' ),
@@ -346,70 +366,98 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
      * @return array
      */
     public function process_payment( $order_id ) {
-        
+
         $order = wc_get_order( $order_id );
 
-        // Log payment attempt
+        if ( ! $order ) {
+            wc_add_notice( __( 'Payment error: invalid order.', 'breeze-payment-gateway' ), 'error' );
+            return array(
+                'result'   => 'failure',
+                'messages' => array( __( 'Invalid order.', 'breeze-payment-gateway' ) ),
+            );
+        }
+
+        $result = $this->create_payment_for_order( $order );
+
+        if ( is_wp_error( $result ) ) {
+            wc_add_notice( __( 'Payment error: ', 'breeze-payment-gateway' ) . $result->get_error_message(), 'error' );
+            return array(
+                'result'   => 'failure',
+                'messages' => array( $result->get_error_message() ),
+            );
+        }
+
+        return array(
+            'result'   => 'success',
+            'redirect' => $result['url'],
+        );
+    }
+
+    /**
+     * Create a Breeze payment page for an existing WC order.
+     *
+     * Public API consumed by both process_payment() and the modal integration.
+     * Builds the line items, calls the Breeze API to create a payment page,
+     * persists the payment page ID and return token, and moves the order to
+     * `pending` status.
+     *
+     * @param WC_Order $order Order object.
+     * @return array|WP_Error On success: { url, id, fail_return_url }.
+     */
+    public function create_payment_for_order( $order ) {
+
+        if ( ! ( $order instanceof WC_Order ) ) {
+            return new WP_Error( 'invalid_order', __( 'Invalid order.', 'breeze-payment-gateway' ) );
+        }
+
         if ( $this->debug ) {
-            $this->log->debug( 
-                sprintf( 'Processing payment for order #%s', $order_id ),
+            $this->log->debug(
+                sprintf( 'Processing payment for order #%s', $order->get_id() ),
                 array( 'source' => $this->id )
             );
         }
 
         try {
-
-            // Step 1: Build line items using client product IDs (inline products)
             $line_items = $this->build_line_items( $order );
 
             if ( empty( $line_items ) ) {
-                throw new Exception( __( 'Failed to build line items.', 'breeze-payment-gateway' ) );
+                return new WP_Error( 'no_line_items', __( 'Failed to build line items.', 'breeze-payment-gateway' ) );
             }
 
-            // Step 2: Create payment page (customer data passed inline)
             $payment_page = $this->create_breeze_payment_page( $order, $line_items );
 
             if ( ! $payment_page || empty( $payment_page['url'] ) ) {
-                throw new Exception( __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
+                return new WP_Error( 'breeze_page_create_failed', __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
             }
 
-            // Store payment page ID for refunds and webhook reconciliation
             $order->update_meta_data( '_breeze_payment_page_id', $payment_page['id'] );
             $order->save();
 
-            // Mark as pending
             $order->update_status( 'pending', __( 'Awaiting Breeze payment.', 'breeze-payment-gateway' ) );
 
-            // Log success
             if ( $this->debug ) {
                 $this->log->info(
-                    sprintf( 'Payment page created for order #%s. URL: %s', $order_id, $payment_page['url'] ),
+                    sprintf( 'Payment page created for order #%s. URL: %s', $order->get_id(), $payment_page['url'] ),
                     array( 'source' => $this->id )
                 );
             }
 
-            // Return success and redirect to Breeze payment page
             return array(
-                'result'   => 'success',
-                'redirect' => $payment_page['url'],
+                'url'             => $payment_page['url'],
+                'id'              => isset( $payment_page['id'] ) ? $payment_page['id'] : '',
+                'fail_return_url' => isset( $payment_page['fail_return_url'] ) ? $payment_page['fail_return_url'] : '',
             );
 
         } catch ( Exception $e ) {
-            
-            wc_add_notice( __( 'Payment error: ', 'breeze-payment-gateway' ) . $e->getMessage(), 'error' );
-            
-            // Log exception
+
             if ( $this->debug ) {
                 $this->log->error(
-                    sprintf( 'Payment exception for order #%s: %s', $order_id, $e->getMessage() ),
+                    sprintf( 'Payment exception for order #%s: %s', $order->get_id(), $e->getMessage() ),
                     array( 'source' => $this->id )
                 );
             }
 
-            return array(
-                'result'   => 'failure',
-                'messages' => array( $e->getMessage() ),
-            );
+            return new WP_Error( 'breeze_payment_exception', $e->getMessage() );
         }
     }
 
@@ -603,6 +651,26 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             );
         }
 
+        $success_return_url = add_query_arg(
+            array(
+                'wc-api'   => 'breeze_return',
+                'order_id' => $order->get_id(),
+                'status'   => 'success',
+                'token'    => $return_token,
+            ),
+            home_url( '/' )
+        );
+
+        $fail_return_url = add_query_arg(
+            array(
+                'wc-api'   => 'breeze_return',
+                'order_id' => $order->get_id(),
+                'status'   => 'failed',
+                'token'    => $return_token,
+            ),
+            home_url( '/' )
+        );
+
         $payment_data = array(
             'lineItems'         => $line_items,
             'billingEmail'      => $order->get_billing_email(),
@@ -612,24 +680,8 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             // stops at the first non-numeric character — so 'order-42-x7k2m9'
             // is correctly resolved back to order 42.
             'clientReferenceId' => 'order-' . $order->get_id() . '-' . wp_generate_password( 6, false, false ),
-            'successReturnUrl'  => add_query_arg(
-                array(
-                    'wc-api'   => 'breeze_return',
-                    'order_id' => $order->get_id(),
-                    'status'   => 'success',
-                    'token'    => $return_token,
-                ),
-                home_url( '/' )
-            ),
-            'failReturnUrl'     => add_query_arg(
-                array(
-                    'wc-api'   => 'breeze_return',
-                    'order_id' => $order->get_id(),
-                    'status'   => 'failed',
-                    'token'    => $return_token,
-                ),
-                home_url( '/' )
-            ),
+            'successReturnUrl'  => $success_return_url,
+            'failReturnUrl'     => $fail_return_url,
             'customer'          => $customer,
         );
 
@@ -676,7 +728,12 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                     );
                 }
             }
-            
+
+            // Surface the fail return URL so callers (modal integration) can
+            // route the customer there if they close the modal mid-payment,
+            // reusing the existing token-protected handle_return() flow.
+            $payment_data['fail_return_url'] = $fail_return_url;
+
             return $payment_data;
         }
 
