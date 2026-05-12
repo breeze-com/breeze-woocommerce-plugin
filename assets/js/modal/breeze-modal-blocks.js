@@ -40,19 +40,25 @@
     var currentFailUrl   = '';
 
     /* ── Origin + URL helpers ────────────────────────────── */
-    function getBreezeHost() {
-        return ( data.breezeHost || '' ).toLowerCase();
+    function getBreezeHosts() {
+        return Array.isArray( data.breezeHosts ) ? data.breezeHosts : [];
     }
 
-    function getBreezeOrigin() {
-        return ( data.breezeOrigin || '' ).replace( /\/$/, '' );
+    function hostIsAllowed( host ) {
+        if ( ! host ) return false;
+        var lower = host.toLowerCase();
+        var allowed = getBreezeHosts();
+        for ( var i = 0; i < allowed.length; i++ ) {
+            if ( lower === String( allowed[ i ] ).toLowerCase() ) return true;
+        }
+        return false;
     }
 
     function isBreezePaymentUrl( url ) {
         if ( ! url ) return false;
         try {
             var parsed = new URL( url, window.location.href );
-            return parsed.hostname.toLowerCase() === getBreezeHost();
+            return hostIsAllowed( parsed.hostname );
         } catch ( e ) {
             return false;
         }
@@ -60,7 +66,12 @@
 
     function isBreezeOrigin( origin ) {
         if ( ! origin ) return false;
-        return origin.toLowerCase() === getBreezeOrigin().toLowerCase();
+        try {
+            var parsed = new URL( origin );
+            return hostIsAllowed( parsed.hostname );
+        } catch ( e ) {
+            return false;
+        }
     }
 
     /* ── fetch() intercept ───────────────────────────────── */

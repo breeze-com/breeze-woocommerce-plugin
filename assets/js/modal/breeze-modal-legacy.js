@@ -41,11 +41,38 @@
     var currentOrderId   = null;
     var paymentConfirmed = false;
 
-    function getBreezeHost()   { return ( data.breezeHost   || '' ).toLowerCase(); }
-    function getBreezeOrigin() { return ( data.breezeOrigin || '' ).replace( /\/$/, '' ); }
+    function getBreezeHosts() {
+        return Array.isArray( data.breezeHosts ) ? data.breezeHosts : [];
+    }
+
+    function hostIsAllowed( host ) {
+        if ( ! host ) return false;
+        var lower = host.toLowerCase();
+        var allowed = getBreezeHosts();
+        for ( var i = 0; i < allowed.length; i++ ) {
+            if ( lower === String( allowed[ i ] ).toLowerCase() ) return true;
+        }
+        return false;
+    }
+
+    function isBreezePaymentUrl( url ) {
+        if ( ! url ) return false;
+        try {
+            var parsed = new URL( url, window.location.href );
+            return hostIsAllowed( parsed.hostname );
+        } catch ( e ) {
+            return false;
+        }
+    }
 
     function isBreezeOrigin( origin ) {
-        return !! origin && origin.toLowerCase() === getBreezeOrigin().toLowerCase();
+        if ( ! origin ) return false;
+        try {
+            var parsed = new URL( origin );
+            return hostIsAllowed( parsed.hostname );
+        } catch ( e ) {
+            return false;
+        }
     }
 
     /* ── Init ────────────────────────────────────────────── */
@@ -127,6 +154,11 @@
                 currentOrderId = response.data.orderId || null;
                 if ( ! paymentUrl ) {
                     showError( 'No payment URL returned. Please try again.' );
+                    return;
+                }
+                if ( ! isBreezePaymentUrl( paymentUrl ) ) {
+                    log( 'Refusing to load non-Breeze payment URL', paymentUrl );
+                    showError( 'Unexpected payment URL received. Please try again.' );
                     return;
                 }
                 openModal( paymentUrl );

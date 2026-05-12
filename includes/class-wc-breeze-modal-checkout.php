@@ -49,14 +49,44 @@ class WC_Breeze_Modal_Checkout {
     }
 
     /**
-     * Returns the Breeze gateway origin used for postMessage targeting and
-     * URL-host validation. Filterable so test/staging environments can point
-     * at a different host.
+     * Allowed hostnames for the Breeze payment page. The Breeze API may return
+     * payment-page URLs on either of these hosts (and a staging environment
+     * could legitimately use a different one), so we accept a list rather than
+     * a single value. The JS modal uses this list to validate the URL host
+     * before loading it into an iframe and to gate inbound/outbound postMessage
+     * traffic against trusted origins.
      *
-     * @return string e.g. "https://pay.breeze.cash"
+     * Filter `breeze_payment_page_hosts` can extend or replace the defaults.
+     *
+     * @return string[] e.g. [ "pay.breeze.cash", "pay.breeze.com" ]
      */
-    public static function get_breeze_origin() {
-        return apply_filters( 'breeze_modal_origin', 'https://pay.breeze.cash' );
+    public static function get_payment_page_hosts() {
+        $hosts = apply_filters(
+            'breeze_payment_page_hosts',
+            array( 'pay.breeze.cash', 'pay.breeze.com' )
+        );
+
+        if ( ! is_array( $hosts ) ) {
+            $hosts = array( (string) $hosts );
+        }
+
+        $clean = array();
+        foreach ( $hosts as $host ) {
+            $host = is_string( $host ) ? trim( strtolower( $host ) ) : '';
+            if ( '' === $host ) {
+                continue;
+            }
+            // If a full URL was passed, extract the host.
+            if ( false !== strpos( $host, '://' ) ) {
+                $parsed = wp_parse_url( $host );
+                $host   = isset( $parsed['host'] ) ? strtolower( $parsed['host'] ) : '';
+            }
+            if ( '' !== $host && ! in_array( $host, $clean, true ) ) {
+                $clean[] = $host;
+            }
+        }
+
+        return $clean;
     }
 
     /** @return WC_Breeze_Payment_Gateway|null */
@@ -127,9 +157,7 @@ class WC_Breeze_Modal_Checkout {
         $parsed      = wp_parse_url( $site_url );
         $site_domain = isset( $parsed['host'] ) ? $parsed['host'] : '';
 
-        $breeze_origin = self::get_breeze_origin();
-        $parsed_origin = wp_parse_url( $breeze_origin );
-        $breeze_host   = isset( $parsed_origin['host'] ) ? $parsed_origin['host'] : '';
+        $breeze_hosts = self::get_payment_page_hosts();
 
         wp_localize_script( $handle, 'breezeModalData', array(
             'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
@@ -138,8 +166,7 @@ class WC_Breeze_Modal_Checkout {
             'currency'     => function_exists( 'get_woocommerce_currency' ) ? get_woocommerce_currency() : '',
             'checkoutUrl'  => function_exists( 'wc_get_checkout_url' ) ? wc_get_checkout_url() : '',
             'siteDomain'   => $site_domain,
-            'breezeOrigin' => $breeze_origin,
-            'breezeHost'   => $breeze_host,
+            'breezeHosts'  => $breeze_hosts,
             'debug'        => (bool) ( defined( 'WP_DEBUG' ) && WP_DEBUG ),
             'gatewayData'  => array(
                 'title'       => $gateway->get_title(),
