@@ -430,7 +430,18 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 return new WP_Error( 'breeze_page_create_failed', __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
             }
 
+            // Keep existing single-ID meta for refunds / backwards compat
             $order->update_meta_data( '_breeze_payment_page_id', $payment_page['id'] );
+
+            // Also append to the cumulative list (for webhook validation across retries)
+            $all_page_ids = $order->get_meta( '_breeze_payment_page_ids' );
+            if ( ! is_array( $all_page_ids ) ) {
+                $all_page_ids = array();
+            }
+            if ( ! in_array( $payment_page['id'], $all_page_ids, true ) ) {
+                $all_page_ids[] = $payment_page['id'];
+            }
+            $order->update_meta_data( '_breeze_payment_page_ids', $all_page_ids );
             $order->save();
 
             $order->update_status( 'pending', __( 'Awaiting Breeze payment.', 'breeze-payment-gateway' ) );
@@ -1216,6 +1227,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // Verify the payment page ID matches what we stored on this order.
         // This prevents a valid webhook for order A from being used to mark order B as paid.
         $stored_page_id  = $order->get_meta( '_breeze_payment_page_id' );
+        $all_page_ids    = $order->get_meta( '_breeze_payment_page_ids' );
         $webhook_page_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
 
         if ( $stored_page_id ) {
@@ -1231,12 +1243,15 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 return false;
             }
 
-            if ( $stored_page_id !== $webhook_page_id ) {
+            // Accept if webhook pageId is in the cumulative list (covers retries),
+            // OR matches the single stored ID (legacy / first-attempt orders).
+            $valid_ids = is_array( $all_page_ids ) && ! empty( $all_page_ids ) ? $all_page_ids : array( $stored_page_id );
+            if ( ! in_array( $webhook_page_id, $valid_ids, true ) ) {
                 if ( $this->debug ) {
                     $this->log->error(
                         sprintf(
-                            'Webhook page ID mismatch for order #%d: stored=%s, webhook=%s',
-                            $order_id, $stored_page_id, $webhook_page_id
+                            'Webhook page ID mismatch for order #%d: valid=%s, webhook=%s',
+                            $order_id, implode( ', ', $valid_ids ), $webhook_page_id
                         ),
                         array( 'source' => $this->id )
                     );
