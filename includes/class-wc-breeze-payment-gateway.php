@@ -430,7 +430,18 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 return new WP_Error( 'breeze_page_create_failed', __( 'Failed to create payment page in Breeze.', 'breeze-payment-gateway' ) );
             }
 
+            // Keep existing single-ID meta for refunds / backwards compat
             $order->update_meta_data( '_breeze_payment_page_id', $payment_page['id'] );
+
+            // Also append to the cumulative list (for webhook validation across retries)
+            $all_page_ids = $order->get_meta( '_breeze_payment_page_ids' );
+            if ( ! is_array( $all_page_ids ) ) {
+                $all_page_ids = array();
+            }
+            if ( ! in_array( $payment_page['id'], $all_page_ids, true ) ) {
+                $all_page_ids[] = $payment_page['id'];
+            }
+            $order->update_meta_data( '_breeze_payment_page_ids', $all_page_ids );
             $order->save();
 
             $order->update_status( 'pending', __( 'Awaiting Breeze payment.', 'breeze-payment-gateway' ) );
@@ -632,7 +643,22 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // Generate a one-time return token to prevent unauthenticated order status manipulation.
         // The token is included in both return URLs and verified in handle_return().
         $return_token = wp_generate_password( 32, false );
+
+        // Keep existing single-token meta for backwards compat with orders that
+        // predate the cumulative list.
         $order->update_meta_data( '_breeze_return_token', $return_token );
+
+        // Also append to the cumulative list — covers checkout retries where the
+        // customer pays on (and returns via) an earlier payment page's URL, which
+        // carries that page's token, not the latest one.
+        $all_tokens = $order->get_meta( '_breeze_return_tokens' );
+        if ( ! is_array( $all_tokens ) ) {
+            $all_tokens = array();
+        }
+        if ( ! in_array( $return_token, $all_tokens, true ) ) {
+            $all_tokens[] = $return_token;
+        }
+        $order->update_meta_data( '_breeze_return_tokens', $all_tokens );
         $order->save();
 
         // Look up existing customer by email; if found pass their Breeze ID,
@@ -840,9 +866,29 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             exit;
         }
 
-        // Verify the one-time return token to prevent unauthenticated order completion.
-        $expected_token = $order->get_meta( '_breeze_return_token' );
-        if ( empty( $expected_token ) || ! hash_equals( $expected_token, $token ) ) {
+        // Verify the return token to prevent unauthenticated order completion.
+        // Accept the submitted token if it's a member of the cumulative list (covers
+        // checkout retries where the customer returned via an earlier payment page),
+        // or matches the legacy single-token meta (orders that predate the list).
+        $all_tokens   = $order->get_meta( '_breeze_return_tokens' );
+        $single_token = $order->get_meta( '_breeze_return_token' );
+
+        $valid_tokens = is_array( $all_tokens ) && ! empty( $all_tokens )
+            ? $all_tokens
+            : ( $single_token ? array( $single_token ) : array() );
+
+        $token_matches = false;
+        if ( ! empty( $token ) ) {
+            foreach ( $valid_tokens as $valid_token ) {
+                // hash_equals() for timing-safe comparison.
+                if ( hash_equals( $valid_token, $token ) ) {
+                    $token_matches = true;
+                    break;
+                }
+            }
+        }
+
+        if ( ! $token_matches ) {
             if ( $this->debug ) {
                 $this->log->warning(
                     sprintf( 'Return URL token verification failed for order #%s', $order_id ),
@@ -853,7 +899,11 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             exit;
         }
 
-        // Consume the token — one-time use only.
+        // Consume all tokens — return URLs are one-time use, and once any one
+        // has been redeemed the order is in a settled state, so further returns
+        // (e.g. from a stale URL belonging to a different payment page) need not
+        // be honored.
+        $order->delete_meta_data( '_breeze_return_tokens' );
         $order->delete_meta_data( '_breeze_return_token' );
         $order->save();
 
@@ -930,7 +980,16 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             return new WP_Error( 'invalid_order', __( 'Invalid order.', 'breeze-payment-gateway' ) );
         }
 
-        $page_id = $order->get_meta( '_breeze_payment_page_id' );
+        // Prefer the transaction ID set by payment_complete() in the webhook handler —
+        // that's the page the customer actually paid on. If multiple payment pages
+        // were created (checkout retries), _breeze_payment_page_id holds the *latest*
+        // created page, which may not be the paid one. Fall back to it only for
+        // orders that predate the webhook setting a transaction ID.
+        $page_id = $order->get_transaction_id();
+
+        if ( empty( $page_id ) ) {
+            $page_id = $order->get_meta( '_breeze_payment_page_id' );
+        }
 
         if ( empty( $page_id ) ) {
             return new WP_Error(
@@ -1216,6 +1275,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // Verify the payment page ID matches what we stored on this order.
         // This prevents a valid webhook for order A from being used to mark order B as paid.
         $stored_page_id  = $order->get_meta( '_breeze_payment_page_id' );
+        $all_page_ids    = $order->get_meta( '_breeze_payment_page_ids' );
         $webhook_page_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
 
         if ( $stored_page_id ) {
@@ -1231,12 +1291,15 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 return false;
             }
 
-            if ( $stored_page_id !== $webhook_page_id ) {
+            // Accept if webhook pageId is in the cumulative list (covers retries),
+            // OR matches the single stored ID (legacy / first-attempt orders).
+            $valid_ids = is_array( $all_page_ids ) && ! empty( $all_page_ids ) ? $all_page_ids : array( $stored_page_id );
+            if ( ! in_array( $webhook_page_id, $valid_ids, true ) ) {
                 if ( $this->debug ) {
                     $this->log->error(
                         sprintf(
-                            'Webhook page ID mismatch for order #%d: stored=%s, webhook=%s',
-                            $order_id, $stored_page_id, $webhook_page_id
+                            'Webhook page ID mismatch for order #%d: valid=%s, webhook=%s',
+                            $order_id, implode( ', ', $valid_ids ), $webhook_page_id
                         ),
                         array( 'source' => $this->id )
                     );
@@ -1271,6 +1334,109 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 )
             );
             // payment_complete() triggers wc_reduce_stock_levels() automatically in WC 3.0+
+
+            // Expire any sibling payment pages created for this order. After a
+            // checkout retry, earlier pages remain "open" in Breeze and could
+            // still accept a charge — which would double-bill the customer.
+            // /v1/payment_pages/{id}/expire prevents that. Best-effort: a
+            // failure here doesn't unwind the (already successful) primary
+            // payment, but we log it so the merchant has a trail.
+            $this->expire_sibling_payment_pages( $order, $transaction_id );
+
+            return;
+        }
+
+        // Order is already paid. Two cases land here:
+        //   1. Idempotent webhook retry (same pageId Breeze already confirmed) — ignore.
+        //   2. A *different* payment page for this same order was paid — i.e. the
+        //      customer was charged twice (paid on multiple retry pages). The plugin
+        //      cannot deduplicate at Breeze's side (each page is an independent
+        //      payment intent with its own clientReferenceId), so surface this loudly
+        //      via an order note + error log so the merchant can issue a manual refund.
+        $incoming_page_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
+        $recorded_page_id = $order->get_transaction_id();
+
+        if ( ! $incoming_page_id || $incoming_page_id === $recorded_page_id ) {
+            return;
+        }
+
+        // Dedupe duplicate-payment notes by pageId so webhook retries don't
+        // spam the order timeline with one note per delivery attempt.
+        $noted = $order->get_meta( '_breeze_duplicate_pages_noted' );
+        if ( ! is_array( $noted ) ) {
+            $noted = array();
+        }
+        if ( in_array( $incoming_page_id, $noted, true ) ) {
+            return;
+        }
+
+        $order->add_order_note(
+            sprintf(
+                /* translators: 1: duplicate payment page ID, 2: original paid page ID */
+                __( 'Duplicate payment received via Breeze on page %1$s. This order was already paid on %2$s, so the customer has likely been charged twice. Issue a manual refund for the duplicate via the Breeze dashboard.', 'breeze-payment-gateway' ),
+                $incoming_page_id,
+                $recorded_page_id ? $recorded_page_id : 'N/A'
+            )
+        );
+
+        $noted[] = $incoming_page_id;
+        $order->update_meta_data( '_breeze_duplicate_pages_noted', $noted );
+        $order->save();
+
+        if ( $this->debug ) {
+            $this->log->error(
+                sprintf(
+                    'DUPLICATE payment webhook for order #%d: incoming pageId=%s, recorded transaction=%s',
+                    $order->get_id(), $incoming_page_id, $recorded_page_id ? $recorded_page_id : 'N/A'
+                ),
+                array( 'source' => $this->id )
+            );
+        }
+    }
+
+    /**
+     * Expire every payment page on the order except the one that just succeeded.
+     *
+     * Uses Breeze's POST /v1/payment_pages/{id}/expire — "Marks an open payment
+     * page as expired so it can no longer accept payments." Called immediately
+     * after payment_complete() to slam the door on any sibling pages from earlier
+     * retry attempts, preventing a second charge if the customer (or anyone with
+     * a stale URL) tries to complete payment on one of them.
+     *
+     * Best-effort: a 4xx from /expire (e.g. page already expired/succeeded) is
+     * a no-op for our purposes; transport-level failures are logged but do not
+     * propagate, since the primary payment is already settled in WC.
+     *
+     * @param WC_Order $order        Order whose sibling pages should be expired.
+     * @param string   $keep_page_id Page ID to leave untouched (the one that was paid).
+     */
+    private function expire_sibling_payment_pages( $order, $keep_page_id ) {
+        $all_page_ids = $order->get_meta( '_breeze_payment_page_ids' );
+        if ( ! is_array( $all_page_ids ) || empty( $all_page_ids ) ) {
+            return;
+        }
+
+        foreach ( $all_page_ids as $page_id ) {
+            if ( ! $page_id || $page_id === $keep_page_id ) {
+                continue;
+            }
+
+            $result = $this->breeze_api_request(
+                'POST',
+                '/v1/payment_pages/' . rawurlencode( $page_id ) . '/expire'
+            );
+
+            if ( false === $result && $this->debug ) {
+                // breeze_api_request() returns false on non-2xx / transport error;
+                // a 2xx with empty body returns null and is treated as success here.
+                $this->log->warning(
+                    sprintf(
+                        'Failed to expire sibling payment page %s for order #%d (the page may still be reachable for payment — monitor for duplicate-charge notes)',
+                        $page_id, $order->get_id()
+                    ),
+                    array( 'source' => $this->id )
+                );
+            }
         }
     }
 
