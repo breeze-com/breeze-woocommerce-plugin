@@ -1334,6 +1334,54 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 )
             );
             // payment_complete() triggers wc_reduce_stock_levels() automatically in WC 3.0+
+            return;
+        }
+
+        // Order is already paid. Two cases land here:
+        //   1. Idempotent webhook retry (same pageId Breeze already confirmed) — ignore.
+        //   2. A *different* payment page for this same order was paid — i.e. the
+        //      customer was charged twice (paid on multiple retry pages). The plugin
+        //      cannot deduplicate at Breeze's side (each page is an independent
+        //      payment intent with its own clientReferenceId), so surface this loudly
+        //      via an order note + error log so the merchant can issue a manual refund.
+        $incoming_page_id = isset( $data['pageId'] ) ? $data['pageId'] : '';
+        $recorded_page_id = $order->get_transaction_id();
+
+        if ( ! $incoming_page_id || $incoming_page_id === $recorded_page_id ) {
+            return;
+        }
+
+        // Dedupe duplicate-payment notes by pageId so webhook retries don't
+        // spam the order timeline with one note per delivery attempt.
+        $noted = $order->get_meta( '_breeze_duplicate_pages_noted' );
+        if ( ! is_array( $noted ) ) {
+            $noted = array();
+        }
+        if ( in_array( $incoming_page_id, $noted, true ) ) {
+            return;
+        }
+
+        $order->add_order_note(
+            sprintf(
+                /* translators: 1: duplicate payment page ID, 2: original paid page ID */
+                __( 'Duplicate payment received via Breeze on page %1$s. This order was already paid on %2$s, so the customer has likely been charged twice. Issue a manual refund for the duplicate via the Breeze dashboard.', 'breeze-payment-gateway' ),
+                $incoming_page_id,
+                $recorded_page_id ? $recorded_page_id : 'N/A'
+            )
+        );
+
+        $noted[] = $incoming_page_id;
+        $order->update_meta_data( '_breeze_duplicate_pages_noted', $noted );
+        $order->save();
+
+        if ( $this->debug ) {
+            $this->log->error(
+                sprintf(
+                    'DUPLICATE payment webhook for order #%d: incoming pageId=%s, recorded transaction=%s',
+                    $order->get_id(), $incoming_page_id, $recorded_page_id ? $recorded_page_id : 'N/A'
+                ),
+                array( 'source' => $this->id )
+            );
         }
     }
 
