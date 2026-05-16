@@ -1334,6 +1334,15 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 )
             );
             // payment_complete() triggers wc_reduce_stock_levels() automatically in WC 3.0+
+
+            // Expire any sibling payment pages created for this order. After a
+            // checkout retry, earlier pages remain "open" in Breeze and could
+            // still accept a charge — which would double-bill the customer.
+            // /v1/payment_pages/{id}/expire prevents that. Best-effort: a
+            // failure here doesn't unwind the (already successful) primary
+            // payment, but we log it so the merchant has a trail.
+            $this->expire_sibling_payment_pages( $order, $transaction_id );
+
             return;
         }
 
@@ -1382,6 +1391,52 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 ),
                 array( 'source' => $this->id )
             );
+        }
+    }
+
+    /**
+     * Expire every payment page on the order except the one that just succeeded.
+     *
+     * Uses Breeze's POST /v1/payment_pages/{id}/expire — "Marks an open payment
+     * page as expired so it can no longer accept payments." Called immediately
+     * after payment_complete() to slam the door on any sibling pages from earlier
+     * retry attempts, preventing a second charge if the customer (or anyone with
+     * a stale URL) tries to complete payment on one of them.
+     *
+     * Best-effort: a 4xx from /expire (e.g. page already expired/succeeded) is
+     * a no-op for our purposes; transport-level failures are logged but do not
+     * propagate, since the primary payment is already settled in WC.
+     *
+     * @param WC_Order $order        Order whose sibling pages should be expired.
+     * @param string   $keep_page_id Page ID to leave untouched (the one that was paid).
+     */
+    private function expire_sibling_payment_pages( $order, $keep_page_id ) {
+        $all_page_ids = $order->get_meta( '_breeze_payment_page_ids' );
+        if ( ! is_array( $all_page_ids ) || empty( $all_page_ids ) ) {
+            return;
+        }
+
+        foreach ( $all_page_ids as $page_id ) {
+            if ( ! $page_id || $page_id === $keep_page_id ) {
+                continue;
+            }
+
+            $result = $this->breeze_api_request(
+                'POST',
+                '/v1/payment_pages/' . rawurlencode( $page_id ) . '/expire'
+            );
+
+            if ( false === $result && $this->debug ) {
+                // breeze_api_request() returns false on non-2xx / transport error;
+                // a 2xx with empty body returns null and is treated as success here.
+                $this->log->warning(
+                    sprintf(
+                        'Failed to expire sibling payment page %s for order #%d (the page may still be reachable for payment — monitor for duplicate-charge notes)',
+                        $page_id, $order->get_id()
+                    ),
+                    array( 'source' => $this->id )
+                );
+            }
         }
     }
 
