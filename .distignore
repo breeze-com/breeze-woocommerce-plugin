@@ -1,6 +1,8 @@
 .distignore
+.DS_Store
 .env
 .env.example
+.git/
 .gitignore
 .gitkeep
 .idea/
@@ -11,9 +13,12 @@ docker-compose.yml
 Makefile
 scripts/
 docs/
+temp/
+tests/
 OPEN_SOURCE_CHECKLIST.md
 CONTRIBUTING.md
 CODE_OF_CONDUCT.md
 SECURITY.md
 CHANGELOG.md
+QA-REPORT.md
 README.md
