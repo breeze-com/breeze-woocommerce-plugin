@@ -643,7 +643,22 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // Generate a one-time return token to prevent unauthenticated order status manipulation.
         // The token is included in both return URLs and verified in handle_return().
         $return_token = wp_generate_password( 32, false );
+
+        // Keep existing single-token meta for backwards compat with orders that
+        // predate the cumulative list.
         $order->update_meta_data( '_breeze_return_token', $return_token );
+
+        // Also append to the cumulative list — covers checkout retries where the
+        // customer pays on (and returns via) an earlier payment page's URL, which
+        // carries that page's token, not the latest one.
+        $all_tokens = $order->get_meta( '_breeze_return_tokens' );
+        if ( ! is_array( $all_tokens ) ) {
+            $all_tokens = array();
+        }
+        if ( ! in_array( $return_token, $all_tokens, true ) ) {
+            $all_tokens[] = $return_token;
+        }
+        $order->update_meta_data( '_breeze_return_tokens', $all_tokens );
         $order->save();
 
         // Look up existing customer by email; if found pass their Breeze ID,
@@ -851,9 +866,29 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             exit;
         }
 
-        // Verify the one-time return token to prevent unauthenticated order completion.
-        $expected_token = $order->get_meta( '_breeze_return_token' );
-        if ( empty( $expected_token ) || ! hash_equals( $expected_token, $token ) ) {
+        // Verify the return token to prevent unauthenticated order completion.
+        // Accept the submitted token if it's a member of the cumulative list (covers
+        // checkout retries where the customer returned via an earlier payment page),
+        // or matches the legacy single-token meta (orders that predate the list).
+        $all_tokens   = $order->get_meta( '_breeze_return_tokens' );
+        $single_token = $order->get_meta( '_breeze_return_token' );
+
+        $valid_tokens = is_array( $all_tokens ) && ! empty( $all_tokens )
+            ? $all_tokens
+            : ( $single_token ? array( $single_token ) : array() );
+
+        $token_matches = false;
+        if ( ! empty( $token ) ) {
+            foreach ( $valid_tokens as $valid_token ) {
+                // hash_equals() for timing-safe comparison.
+                if ( hash_equals( $valid_token, $token ) ) {
+                    $token_matches = true;
+                    break;
+                }
+            }
+        }
+
+        if ( ! $token_matches ) {
             if ( $this->debug ) {
                 $this->log->warning(
                     sprintf( 'Return URL token verification failed for order #%s', $order_id ),
@@ -864,7 +899,11 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             exit;
         }
 
-        // Consume the token — one-time use only.
+        // Consume all tokens — return URLs are one-time use, and once any one
+        // has been redeemed the order is in a settled state, so further returns
+        // (e.g. from a stale URL belonging to a different payment page) need not
+        // be honored.
+        $order->delete_meta_data( '_breeze_return_tokens' );
         $order->delete_meta_data( '_breeze_return_token' );
         $order->save();
 
