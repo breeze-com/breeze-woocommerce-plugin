@@ -941,7 +941,16 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             return new WP_Error( 'invalid_order', __( 'Invalid order.', 'breeze-payment-gateway' ) );
         }
 
-        $page_id = $order->get_meta( '_breeze_payment_page_id' );
+        // Prefer the transaction ID set by payment_complete() in the webhook handler —
+        // that's the page the customer actually paid on. If multiple payment pages
+        // were created (checkout retries), _breeze_payment_page_id holds the *latest*
+        // created page, which may not be the paid one. Fall back to it only for
+        // orders that predate the webhook setting a transaction ID.
+        $page_id = $order->get_transaction_id();
+
+        if ( empty( $page_id ) ) {
+            $page_id = $order->get_meta( '_breeze_payment_page_id' );
+        }
 
         if ( empty( $page_id ) ) {
             return new WP_Error(
