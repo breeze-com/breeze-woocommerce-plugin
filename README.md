@@ -27,11 +27,11 @@
 
 ## Installation
 
-1. Upload the `breeze-payment-gateway` folder to `/wp-content/plugins/`
-2. Activate the plugin through the 'Plugins' menu in WordPress
-3. Go to WooCommerce > Settings > Payments
-4. Enable "Breeze"
-5. Click "Manage" to configure settings
+1. Download the latest **`breeze-payment-gateway-X.X.X.zip`** asset from the [Releases page](https://github.com/breeze-com/breeze-woocommerce-plugin/releases/latest).
+   > Grab the asset named `breeze-payment-gateway-*.zip` under **Assets**, *not* the auto-generated *"Source code (zip)"* / *"Source code (tar.gz)"* links — those unpack to a wrongly-named folder and will install as a separate plugin alongside any existing version instead of upgrading it.
+2. In WordPress, go to **Plugins → Add New → Upload Plugin** and upload the zip.
+3. Activate "Breeze" from the Plugins list.
+4. Go to **WooCommerce → Settings → Payments**, enable "Breeze", and click **Manage** to configure.
 
 ## Configuration
 
