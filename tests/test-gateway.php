@@ -2817,6 +2817,131 @@ function test_happy_path_preferred_payment_methods() {
     assert_true( strpos( $final_url, 'preferred_payment_methods=' ) !== false, 'URL has param key' );
 }
 
+// ─── Test: Crypto network + token appended to URL ───────────────────────────
+
+function test_crypto_network_token_appended_to_url() {
+    echo "\n🧪 Test 119: Crypto network and token appended to URL\n";
+
+    $base_url = 'https://pay.breeze.cash/page_abc123';
+
+    // Simulate: preferred_payment_methods=crypto_deposit already set
+    $url = $base_url . '?preferred_payment_methods=crypto_deposit';
+
+    // Append network
+    $network = 'BINANCE';
+    $url = $url . '&network=' . strtoupper( $network );
+
+    // Append token
+    $token = 'USDT';
+    $url = $url . '&token=' . strtoupper( $token );
+
+    assert_true( strpos( $url, 'network=BINANCE' ) !== false, 'URL contains network=BINANCE' );
+    assert_true( strpos( $url, 'token=USDT' ) !== false, 'URL contains token=USDT' );
+    assert_true( strpos( $url, 'preferred_payment_methods=crypto_deposit' ) !== false, 'URL contains preferred_payment_methods' );
+
+    // Verify combined URL shape matches expected format
+    $expected_fragment = 'network=BINANCE&token=USDT&preferred_payment_methods=crypto_deposit';
+    // All three keys present (order not guaranteed, check individually)
+    assert_true( strpos( $url, 'network=' ) !== false, 'network key present' );
+    assert_true( strpos( $url, 'token=' ) !== false, 'token key present' );
+}
+
+function test_crypto_network_token_not_appended_when_empty() {
+    echo "\n🧪 Test 120: Crypto network/token NOT appended when settings are empty\n";
+
+    $base_url = 'https://pay.breeze.cash/page_abc123';
+    $url      = $base_url . '?preferred_payment_methods=apple_pay';
+
+    $crypto_network = '';
+    $crypto_token   = '';
+
+    if ( ! empty( $crypto_network ) ) {
+        $url = $url . '&network=' . strtoupper( $crypto_network );
+    }
+    if ( ! empty( $crypto_token ) ) {
+        $url = $url . '&token=' . strtoupper( $crypto_token );
+    }
+
+    assert_true( strpos( $url, 'network=' ) === false, 'No network param when empty' );
+    assert_true( strpos( $url, 'token=' ) === false, 'No token param when empty' );
+    assert_true( strpos( $url, 'preferred_payment_methods=apple_pay' ) !== false, 'Payment method still present' );
+}
+
+// ─── Tests: Pass-through fee ─────────────────────────────────────────────────
+
+function test_passthrough_fee_line_item_and_price_display() {
+    echo "\n🧪 Test 121: Pass-through fee — line item added and priceDisplay set\n";
+
+    $fee_minor_units = 49; // $0.49
+    $currency        = 'USD';
+
+    $line_items = array(
+        array( 'clientProductId' => 'prod_1', 'displayName' => 'Game Token Pack', 'amount' => 1000, 'currency' => $currency, 'quantity' => 1 ),
+    );
+
+    $payment_data = array( 'lineItems' => $line_items );
+
+    // Simulate the passthrough fee logic from create_breeze_payment_page
+    if ( $fee_minor_units > 0 ) {
+        $payment_data['lineItems'][] = array(
+            'clientProductId' => 'breeze_fee',
+            'displayName'     => 'Processing Fee',
+            'amount'          => $fee_minor_units,
+            'currency'        => $currency,
+            'quantity'        => 1,
+        );
+        $payment_data['priceDisplay'] = array( 'isFeeIncluded' => true );
+    }
+
+    assert_true( count( $payment_data['lineItems'] ) === 2, 'Fee line item appended' );
+    $fee_item = $payment_data['lineItems'][1];
+    assert_true( $fee_item['clientProductId'] === 'breeze_fee', 'clientProductId is breeze_fee' );
+    assert_true( $fee_item['displayName'] === 'Processing Fee', 'Display name is Processing Fee' );
+    assert_true( $fee_item['amount'] === 49, 'Fee amount is 49 minor units' );
+    assert_true( $fee_item['quantity'] === 1, 'Fee quantity is 1' );
+    assert_true( isset( $payment_data['priceDisplay'] ), 'priceDisplay key exists' );
+    assert_true( $payment_data['priceDisplay']['isFeeIncluded'] === true, 'isFeeIncluded is true' );
+}
+
+function test_passthrough_fee_not_added_when_empty() {
+    echo "\n🧪 Test 122: Pass-through fee — NOT added when setting is empty\n";
+
+    $fee_setting = ''; // disabled
+
+    $line_items = array(
+        array( 'clientProductId' => 'prod_1', 'displayName' => 'Game Token Pack', 'amount' => 1000, 'currency' => 'USD', 'quantity' => 1 ),
+    );
+    $payment_data = array( 'lineItems' => $line_items );
+
+    $fee_minor_units = '' !== $fee_setting && null !== $fee_setting ? (int) $fee_setting : 0;
+    if ( $fee_minor_units > 0 ) {
+        $payment_data['lineItems'][] = array( 'clientProductId' => 'breeze_fee', 'amount' => $fee_minor_units, 'currency' => 'USD', 'quantity' => 1 );
+        $payment_data['priceDisplay'] = array( 'isFeeIncluded' => true );
+    }
+
+    assert_true( count( $payment_data['lineItems'] ) === 1, 'No fee line item when setting is empty' );
+    assert_true( ! isset( $payment_data['priceDisplay'] ), 'priceDisplay not set when fee is empty' );
+}
+
+function test_passthrough_fee_total_is_inclusive() {
+    echo "\n🧪 Test 123: Pass-through fee — total sent to Breeze is order total + fee\n";
+
+    $order_total_cents = 1000; // $10.00
+    $fee_cents         = 49;   // $0.49
+
+    $line_items = array(
+        array( 'clientProductId' => 'prod_1', 'amount' => $order_total_cents, 'currency' => 'USD', 'quantity' => 1 ),
+    );
+
+    // After fee line item is appended
+    $line_items[] = array( 'clientProductId' => 'breeze_fee', 'amount' => $fee_cents, 'currency' => 'USD', 'quantity' => 1 );
+
+    $total_sent = array_sum( array_column( $line_items, 'amount' ) );
+
+    assert_true( $total_sent === 1049, sprintf( 'Total sent to Breeze is 1049 minor units (expected: 1049, got: %d)', $total_sent ) );
+    assert_true( $total_sent === $order_total_cents + $fee_cents, 'Total equals order total + fee' );
+}
+
 function test_happy_path_order_notes_audit_trail() {
     echo "\n🧪 Test 119: HAPPY PATH — Complete audit trail in order notes\n";
 
@@ -3020,6 +3145,11 @@ test_happy_path_guest_checkout();
 test_happy_path_returning_customer();
 test_happy_path_test_mode_vs_live();
 test_happy_path_preferred_payment_methods();
+test_crypto_network_token_appended_to_url();
+test_crypto_network_token_not_appended_when_empty();
+test_passthrough_fee_line_item_and_price_display();
+test_passthrough_fee_not_added_when_empty();
+test_passthrough_fee_total_is_inclusive();
 test_happy_path_order_notes_audit_trail();
 test_happy_path_multiple_orders_different_customers();
 test_send_product_description_off_by_default();

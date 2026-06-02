@@ -46,6 +46,27 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     /** @var array */
     protected $payment_methods = array();
 
+    /**
+     * Pass-through fee in minor units (e.g. 49 = $0.49). Empty = disabled.
+     *
+     * @var string
+     */
+    protected $passthrough_fee = '';
+
+    /**
+     * Preferred crypto network (e.g. BINANCE, ETHEREUM).
+     *
+     * @var string
+     */
+    protected $crypto_network = '';
+
+    /**
+     * Preferred crypto token (e.g. USDT, USDC).
+     *
+     * @var string
+     */
+    protected $crypto_token = '';
+
     /** @var bool */
     public $send_product_description = false;
 
@@ -109,6 +130,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->webhook_secret     = $this->get_option( 'webhook_secret', '' );
         $this->debug              = 'yes' === $this->get_option( 'debug', 'no' );
         $this->payment_methods        = $this->get_option( 'payment_methods', array() );
+        $this->crypto_network         = $this->get_option( 'crypto_network', '' );
+        $this->crypto_token           = $this->get_option( 'crypto_token', '' );
+        $this->passthrough_fee        = $this->get_option( 'passthrough_fee', '' );
         $this->send_product_description = 'yes' === $this->get_option( 'send_product_description', 'no' );
         $this->flexible_amount_max        = $this->get_option( 'flexible_amount_max' );
         $this->flexible_amount_percentage = $this->get_option( 'flexible_amount_percentage' );
@@ -246,6 +270,38 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 ),
                 'class'       => 'wc-enhanced-select',
             ),
+            'crypto_network' => array(
+                'title'       => __( 'Preferred Crypto Network', 'breeze-payment-gateway' ),
+                'type'        => 'select',
+                'description' => __( 'Pre-select a crypto network on the Breeze checkout page. Only applies when Crypto is set as a preferred payment method. Leave blank to let the customer choose.', 'breeze-payment-gateway' ),
+                'default'     => '',
+                'desc_tip'    => true,
+                'options'     => array(
+                    ''          => __( '— None —', 'breeze-payment-gateway' ),
+                    'BINANCE'   => __( 'Binance (BEP-20)', 'breeze-payment-gateway' ),
+                    'ETHEREUM'  => __( 'Ethereum (ERC-20)', 'breeze-payment-gateway' ),
+                    'TRON'      => __( 'Tron (TRC-20)', 'breeze-payment-gateway' ),
+                    'SOLANA'    => __( 'Solana', 'breeze-payment-gateway' ),
+                    'POLYGON'   => __( 'Polygon', 'breeze-payment-gateway' ),
+                ),
+            ),
+            'crypto_token' => array(
+                'title'       => __( 'Preferred Crypto Token', 'breeze-payment-gateway' ),
+                'type'        => 'select',
+                'description' => __( 'Pre-select a crypto token on the Breeze checkout page. Only applies when Crypto is set as a preferred payment method. Leave blank to let the customer choose.', 'breeze-payment-gateway' ),
+                'default'     => '',
+                'desc_tip'    => true,
+                'options'     => array(
+                    ''     => __( '— None —', 'breeze-payment-gateway' ),
+                    'USDT' => __( 'USDT (Tether)', 'breeze-payment-gateway' ),
+                    'USDC' => __( 'USDC (USD Coin)', 'breeze-payment-gateway' ),
+                    'BTC'  => __( 'BTC (Bitcoin)', 'breeze-payment-gateway' ),
+                    'ETH'  => __( 'ETH (Ethereum)', 'breeze-payment-gateway' ),
+                    'BNB'  => __( 'BNB (Binance Coin)', 'breeze-payment-gateway' ),
+                    'SOL'  => __( 'SOL (Solana)', 'breeze-payment-gateway' ),
+                    'TRX'  => __( 'TRX (Tron)', 'breeze-payment-gateway' ),
+                ),
+            ),
             'send_product_description' => array(
                 'title'       => __( 'Product Description', 'breeze-payment-gateway' ),
                 'label'       => __( 'Send product description to Breeze', 'breeze-payment-gateway' ),
@@ -283,6 +339,19 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'desc_tip'          => true,
                 'custom_attributes' => array( 'min' => '1', 'step' => '1' ),
             ),
+            'passthrough_fee_section' => array(
+                'title'       => __( 'Pass-Through Fee', 'breeze-payment-gateway' ),
+                'type'        => 'title',
+                'description' => __( 'Charge Breeze\'s processing fee directly to the customer. When set, the fee is added as a line item so the amount sent to Breeze is inclusive of the fee, and Breeze is informed via <code>priceDisplay.isFeeIncluded</code>. Leave blank to absorb the fee yourself.', 'breeze-payment-gateway' ),
+            ),
+            'passthrough_fee' => array(
+                'title'             => __( 'Fee Amount (minor units)', 'breeze-payment-gateway' ),
+                'type'              => 'number',
+                'description'       => __( 'Fixed fee to pass through to the customer in minor units (e.g. 49 = $0.49). Leave blank to disable. When set, this amount is added as a "Processing Fee" line item on the Breeze checkout page.', 'breeze-payment-gateway' ),
+                'default'           => '',
+                'desc_tip'          => true,
+                'custom_attributes' => array( 'min' => '1', 'step' => '1' ),
+            ),
         );
     }
 
@@ -299,6 +368,13 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
      */
     public function validate_flexible_amount_fixed_field( $key, $value ) {
         return $this->validate_positive_integer_minor_units( $key, $value, __( 'Fixed Amount', 'breeze-payment-gateway' ) );
+    }
+
+    /**
+     * Validate Pass-Through Fee: blank, or positive integer (minor units, > 0).
+     */
+    public function validate_passthrough_fee_field( $key, $value ) {
+        return $this->validate_positive_integer_minor_units( $key, $value, __( 'Fee Amount', 'breeze-payment-gateway' ) );
     }
 
     /**
@@ -685,6 +761,31 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             'customer'          => $customer,
         );
 
+        // Conditionally append a pass-through fee line item and priceDisplay.isFeeIncluded.
+        // When enabled the fee is surfaced as a separate "Processing Fee" line item so the
+        // customer sees the charge, and Breeze is told via priceDisplay that the amount is
+        // already inclusive of its fee.
+        $fee_minor_units = '' !== $this->passthrough_fee && null !== $this->passthrough_fee
+            ? (int) $this->passthrough_fee
+            : 0;
+        if ( $fee_minor_units > 0 ) {
+            $payment_data['lineItems'][] = array(
+                'clientProductId' => 'breeze_fee',
+                'displayName'     => __( 'Processing Fee', 'breeze-payment-gateway' ),
+                'amount'          => $fee_minor_units,
+                'currency'        => $order->get_currency(),
+                'quantity'        => 1,
+            );
+            $payment_data['priceDisplay'] = array( 'isFeeIncluded' => true );
+
+            if ( $this->debug ) {
+                $this->log->debug(
+                    sprintf( 'Pass-through fee applied: %d minor units (priceDisplay.isFeeIncluded = true)', $fee_minor_units ),
+                    array( 'source' => $this->id )
+                );
+            }
+        }
+
         // Conditionally append settings.flexibleAmount when at least one sub-field is configured.
         // Per spec, flexibleAmount lives under `settings` and is only honored for crypto deposit payments.
         $has_percentage = '' !== $this->flexible_amount_percentage && null !== $this->flexible_amount_percentage;
@@ -724,6 +825,37 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 if ( $this->debug ) {
                     $this->log->debug(
                         sprintf( 'Adding payment methods to URL: %s', $payment_methods_string ),
+                        array( 'source' => $this->id )
+                    );
+                }
+            }
+
+            // Add preferred crypto network and token as query parameters if configured
+            if ( ! empty( $this->crypto_network ) ) {
+                $payment_data['url'] = add_query_arg(
+                    'network',
+                    strtoupper( sanitize_text_field( $this->crypto_network ) ),
+                    $payment_data['url']
+                );
+
+                if ( $this->debug ) {
+                    $this->log->debug(
+                        sprintf( 'Adding crypto network to URL: %s', $this->crypto_network ),
+                        array( 'source' => $this->id )
+                    );
+                }
+            }
+
+            if ( ! empty( $this->crypto_token ) ) {
+                $payment_data['url'] = add_query_arg(
+                    'token',
+                    strtoupper( sanitize_text_field( $this->crypto_token ) ),
+                    $payment_data['url']
+                );
+
+                if ( $this->debug ) {
+                    $this->log->debug(
+                        sprintf( 'Adding crypto token to URL: %s', $this->crypto_token ),
                         array( 'source' => $this->id )
                     );
                 }
