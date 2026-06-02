@@ -2820,7 +2820,7 @@ function test_happy_path_preferred_payment_methods() {
 // ─── Test: Crypto network + token appended to URL ───────────────────────────
 
 function test_crypto_network_token_appended_to_url() {
-    echo "\n🧪 Test 119: Crypto network and token appended to URL\n";
+    echo "\n🧪 Test 127: Crypto network and token appended to URL\n";
 
     $base_url = 'https://pay.breeze.cash/page_abc123';
 
@@ -2847,7 +2847,7 @@ function test_crypto_network_token_appended_to_url() {
 }
 
 function test_crypto_network_token_not_appended_when_empty() {
-    echo "\n🧪 Test 120: Crypto network/token NOT appended when settings are empty\n";
+    echo "\n🧪 Test 128: Crypto network/token NOT appended when settings are empty\n";
 
     $base_url = 'https://pay.breeze.cash/page_abc123';
     $url      = $base_url . '?preferred_payment_methods=apple_pay';
@@ -2896,7 +2896,7 @@ function apply_passthrough_fee( &$payment_data, $fee_type, $fee_fixed, $fee_perc
 }
 
 function test_passthrough_fee_fixed_line_item_and_price_display() {
-    echo "\n🧪 Test 121: Pass-through fee (fixed) — line item added and priceDisplay set\n";
+    echo "\n🧪 Test 129: Pass-through fee (fixed) — line item added and priceDisplay set\n";
 
     $payment_data = array(
         'lineItems' => array(
@@ -2917,7 +2917,7 @@ function test_passthrough_fee_fixed_line_item_and_price_display() {
 }
 
 function test_passthrough_fee_percentage_line_item_and_price_display() {
-    echo "\n🧪 Test 122: Pass-through fee (percentage) — fee computed from order total\n";
+    echo "\n🧪 Test 130: Pass-through fee (percentage) — fee computed from order total\n";
 
     // $10.00 order, 4.9% fee → 49 minor units
     $payment_data = array(
@@ -2935,7 +2935,7 @@ function test_passthrough_fee_percentage_line_item_and_price_display() {
 }
 
 function test_passthrough_fee_percentage_multi_qty() {
-    echo "\n🧪 Test 123: Pass-through fee (percentage) — multi-qty line items summed correctly\n";
+    echo "\n🧪 Test 131: Pass-through fee (percentage) — multi-qty line items summed correctly\n";
 
     // 3 × $5.00 items = $15.00 total = 1500 minor units, 3% fee = 45 minor units
     $payment_data = array(
@@ -2950,7 +2950,7 @@ function test_passthrough_fee_percentage_multi_qty() {
 }
 
 function test_passthrough_fee_not_added_when_disabled() {
-    echo "\n🧪 Test 124: Pass-through fee — NOT added when type is blank\n";
+    echo "\n🧪 Test 132: Pass-through fee — NOT added when type is blank\n";
 
     $payment_data = array(
         'lineItems' => array(
@@ -2966,7 +2966,7 @@ function test_passthrough_fee_not_added_when_disabled() {
 }
 
 function test_passthrough_fee_total_is_inclusive() {
-    echo "\n🧪 Test 125: Pass-through fee — total sent to Breeze is order total + fee\n";
+    echo "\n🧪 Test 133: Pass-through fee — total sent to Breeze is order total + fee\n";
 
     $payment_data = array(
         'lineItems' => array(
@@ -2985,7 +2985,7 @@ function test_passthrough_fee_total_is_inclusive() {
 }
 
 function test_passthrough_fee_percentage_rounding() {
-    echo "\n🧪 Test 126: Pass-through fee (percentage) — fractional cents rounded correctly\n";
+    echo "\n🧪 Test 134: Pass-through fee (percentage) — fractional cents rounded correctly\n";
 
     // $9.99 order = 999 minor units, 5% = 49.95 → rounds to 50
     $payment_data = array(
