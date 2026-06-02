@@ -39,3 +39,9 @@ jobs:
           # published as pre-releases so they are not flagged "Latest" — keeps test
           # builds out of the install-doc path that points at the latest asset.
           prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## Installation
+
+            Download **`breeze-payment-gateway-${{ steps.version.outputs.version }}.zip`** from the **Assets** section below and upload it via *WordPress → Plugins → Add New → Upload Plugin*.
+
+            > **Do not use** the auto-generated *"Source code (zip)"* / *"Source code (tar.gz)"* links at the bottom of this page. Those are raw git archives that unpack to `breeze-woocommerce-plugin-${{ steps.version.outputs.version }}/`, which doesn't match the plugin's installed folder name (`breeze-payment-gateway/`). Uploading the wrong zip creates a duplicate plugin entry next to your existing install instead of upgrading it.
