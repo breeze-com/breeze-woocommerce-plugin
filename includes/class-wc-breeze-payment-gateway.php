@@ -47,11 +47,25 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     protected $payment_methods = array();
 
     /**
-     * Pass-through fee in minor units (e.g. 49 = $0.49). Empty = disabled.
+     * Pass-through fee type: 'fixed' or 'percentage'. Empty = disabled.
      *
      * @var string
      */
-    protected $passthrough_fee = '';
+    protected $passthrough_fee_type = '';
+
+    /**
+     * Pass-through fee — fixed amount in minor units (e.g. 49 = $0.49).
+     *
+     * @var string
+     */
+    protected $passthrough_fee_fixed = '';
+
+    /**
+     * Pass-through fee — percentage of order total (e.g. 4.9 = 4.9%).
+     *
+     * @var string
+     */
+    protected $passthrough_fee_percentage = '';
 
     /**
      * Preferred crypto network (e.g. BINANCE, ETHEREUM).
@@ -132,7 +146,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->payment_methods        = $this->get_option( 'payment_methods', array() );
         $this->crypto_network         = $this->get_option( 'crypto_network', '' );
         $this->crypto_token           = $this->get_option( 'crypto_token', '' );
-        $this->passthrough_fee        = $this->get_option( 'passthrough_fee', '' );
+        $this->passthrough_fee_type       = $this->get_option( 'passthrough_fee_type', '' );
+        $this->passthrough_fee_fixed      = $this->get_option( 'passthrough_fee_fixed', '' );
+        $this->passthrough_fee_percentage = $this->get_option( 'passthrough_fee_percentage', '' );
         $this->send_product_description = 'yes' === $this->get_option( 'send_product_description', 'no' );
         $this->flexible_amount_max        = $this->get_option( 'flexible_amount_max' );
         $this->flexible_amount_percentage = $this->get_option( 'flexible_amount_percentage' );
@@ -342,15 +358,35 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             'passthrough_fee_section' => array(
                 'title'       => __( 'Pass-Through Fee', 'breeze-payment-gateway' ),
                 'type'        => 'title',
-                'description' => __( 'Charge Breeze\'s processing fee directly to the customer. When set, the fee is added as a line item so the amount sent to Breeze is inclusive of the fee, and Breeze is informed via <code>priceDisplay.isFeeIncluded</code>. Leave blank to absorb the fee yourself.', 'breeze-payment-gateway' ),
+                'description' => __( 'Charge Breeze\'s processing fee directly to the customer. When configured, the fee is added as a visible "Processing Fee" line item and Breeze is informed via <code>priceDisplay.isFeeIncluded</code>. Leave type blank to absorb the fee yourself.', 'breeze-payment-gateway' ),
             ),
-            'passthrough_fee' => array(
-                'title'             => __( 'Fee Amount (minor units)', 'breeze-payment-gateway' ),
+            'passthrough_fee_type' => array(
+                'title'       => __( 'Fee Type', 'breeze-payment-gateway' ),
+                'type'        => 'select',
+                'description' => __( 'Choose how the pass-through fee is calculated. "Fixed" charges a flat amount; "Percentage" charges a % of the order total. Select blank to disable pass-through fees.', 'breeze-payment-gateway' ),
+                'default'     => '',
+                'desc_tip'    => true,
+                'options'     => array(
+                    ''           => __( '— Disabled —', 'breeze-payment-gateway' ),
+                    'fixed'      => __( 'Fixed amount (minor units)', 'breeze-payment-gateway' ),
+                    'percentage' => __( 'Percentage of order total', 'breeze-payment-gateway' ),
+                ),
+            ),
+            'passthrough_fee_fixed' => array(
+                'title'             => __( 'Fixed Fee Amount (minor units)', 'breeze-payment-gateway' ),
                 'type'              => 'number',
-                'description'       => __( 'Fixed fee to pass through to the customer in minor units (e.g. 49 = $0.49). Leave blank to disable. When set, this amount is added as a "Processing Fee" line item on the Breeze checkout page.', 'breeze-payment-gateway' ),
+                'description'       => __( 'Flat fee in minor units (e.g. 49 = $0.49). Only used when Fee Type is set to "Fixed".', 'breeze-payment-gateway' ),
                 'default'           => '',
                 'desc_tip'          => true,
                 'custom_attributes' => array( 'min' => '1', 'step' => '1' ),
+            ),
+            'passthrough_fee_percentage' => array(
+                'title'             => __( 'Percentage Fee (%)', 'breeze-payment-gateway' ),
+                'type'              => 'number',
+                'description'       => __( 'Fee as a percentage of the order total (e.g. 4.9 = 4.9%). Must be greater than 0 and no more than 100. Only used when Fee Type is set to "Percentage". The computed fee is rounded to the nearest minor unit.', 'breeze-payment-gateway' ),
+                'default'           => '',
+                'desc_tip'          => true,
+                'custom_attributes' => array( 'min' => '0.01', 'max' => '100', 'step' => '0.01' ),
             ),
         );
     }
@@ -371,10 +407,25 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
-     * Validate Pass-Through Fee: blank, or positive integer (minor units, > 0).
+     * Validate Pass-Through Fixed Fee: blank, or positive integer (minor units, > 0).
      */
-    public function validate_passthrough_fee_field( $key, $value ) {
-        return $this->validate_positive_integer_minor_units( $key, $value, __( 'Fee Amount', 'breeze-payment-gateway' ) );
+    public function validate_passthrough_fee_fixed_field( $key, $value ) {
+        return $this->validate_positive_integer_minor_units( $key, $value, __( 'Fixed Fee Amount', 'breeze-payment-gateway' ) );
+    }
+
+    /**
+     * Validate Pass-Through Percentage Fee: blank, or number in (0, 100].
+     */
+    public function validate_passthrough_fee_percentage_field( $key, $value ) {
+        if ( '' === trim( $value ) ) {
+            return '';
+        }
+        $float = (float) $value;
+        if ( $float <= 0 || $float > 100 ) {
+            WC_Admin_Settings::add_error( __( 'Percentage Fee must be greater than 0 and no more than 100.', 'breeze-payment-gateway' ) );
+            return '';
+        }
+        return (string) $float;
     }
 
     /**
@@ -765,9 +816,18 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         // When enabled the fee is surfaced as a separate "Processing Fee" line item so the
         // customer sees the charge, and Breeze is told via priceDisplay that the amount is
         // already inclusive of its fee.
-        $fee_minor_units = '' !== $this->passthrough_fee && null !== $this->passthrough_fee
-            ? (int) $this->passthrough_fee
-            : 0;
+        $fee_minor_units = 0;
+        if ( 'fixed' === $this->passthrough_fee_type && '' !== $this->passthrough_fee_fixed ) {
+            $fee_minor_units = (int) $this->passthrough_fee_fixed;
+        } elseif ( 'percentage' === $this->passthrough_fee_type && '' !== $this->passthrough_fee_percentage ) {
+            // Sum existing line items to get the order subtotal in minor units, then apply %.
+            $subtotal_minor_units = 0;
+            foreach ( $payment_data['lineItems'] as $item ) {
+                $subtotal_minor_units += (int) $item['amount'] * (int) $item['quantity'];
+            }
+            $fee_minor_units = (int) round( $subtotal_minor_units * ( (float) $this->passthrough_fee_percentage / 100 ) );
+        }
+
         if ( $fee_minor_units > 0 ) {
             $payment_data['lineItems'][] = array(
                 'clientProductId' => 'breeze_fee',
@@ -780,7 +840,11 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
 
             if ( $this->debug ) {
                 $this->log->debug(
-                    sprintf( 'Pass-through fee applied: %d minor units (priceDisplay.isFeeIncluded = true)', $fee_minor_units ),
+                    sprintf(
+                        'Pass-through fee applied: %d minor units via %s (priceDisplay.isFeeIncluded = true)',
+                        $fee_minor_units,
+                        $this->passthrough_fee_type
+                    ),
                     array( 'source' => $this->id )
                 );
             }
