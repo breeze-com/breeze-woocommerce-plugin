@@ -73,6 +73,35 @@ check_eq( false, WC_Breeze_Payment_Gateway::should_append_crypto_params( array( 
 check_eq( false, WC_Breeze_Payment_Gateway::should_append_crypto_params( array() ),                              'none selected → do NOT append' );
 check_eq( false, WC_Breeze_Payment_Gateway::should_append_crypto_params( '' ),                                   'non-array → do NOT append' );
 
+// ─── build_tax_details() — real method (merchant-calculated tax) ─────────────
+
+echo "\n🧪 Merchant-calculated tax: build_tax_details()\n";
+
+check_eq( null, WC_Breeze_Payment_Gateway::build_tax_details( false, 1.80 ), 'Disabled → null (no taxDetails sent)' );
+check_eq( null, WC_Breeze_Payment_Gateway::build_tax_details( false, 0 ),    'Disabled with zero tax → still null' );
+
+check_eq(
+    array( 'amount' => 180, 'mode' => 'merchant_handled' ),
+    WC_Breeze_Payment_Gateway::build_tax_details( true, 1.80 ),
+    'Enabled, $1.80 tax → 180 minor units, merchant_handled'
+);
+check_eq(
+    array( 'amount' => 0, 'mode' => 'merchant_handled' ),
+    WC_Breeze_Payment_Gateway::build_tax_details( true, 0 ),
+    'Enabled, $0 tax → 0 sent (zero-rated is valid)'
+);
+check_eq(
+    array( 'amount' => 1600, 'mode' => 'merchant_handled' ),
+    WC_Breeze_Payment_Gateway::build_tax_details( true, 16.00 ),
+    'Enabled, $16.00 tax → 1600 minor units'
+);
+// Float-to-cents rounding parity with the rest of the plugin (round half away from zero).
+check_eq(
+    array( 'amount' => 181, 'mode' => 'merchant_handled' ),
+    WC_Breeze_Payment_Gateway::build_tax_details( true, 1.805 ),
+    '$1.805 rounds to 181 minor units'
+);
+
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo "\n" . str_repeat( '━', 32 ) . "\n";
