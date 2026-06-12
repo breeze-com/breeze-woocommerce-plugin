@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "deny": [
+      "Edit(.github/workflows/**)",
+      "Write(.github/workflows/**)",
+      "Read(.env)",
+      "Read(**/.env)",
+      "Read(**/.env.local)",
+      "Read(**/.env.production)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Bash(git merge:*)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "WebFetch",
+      "WebSearch"
+    ]
+  }
+}
