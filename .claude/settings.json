@@ -33,9 +33,7 @@
       "Read(**/*.key)",
       "Bash(git merge:*)",
       "Bash(git push --force:*)",
-      "Bash(git push -f:*)",
-      "WebFetch",
-      "WebSearch"
+      "Bash(git push -f:*)"
     ]
   }
 }
