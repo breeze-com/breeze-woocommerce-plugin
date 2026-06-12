@@ -337,7 +337,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'title'       => __( 'Merchant-Calculated Tax', 'breeze-payment-gateway' ),
                 'label'       => __( 'Send WooCommerce-calculated tax to Breeze', 'breeze-payment-gateway' ),
                 'type'        => 'checkbox',
-                'description' => __( 'When enabled, the tax WooCommerce calculates for each order is sent to Breeze and shown on the payment page, and Breeze skips its own location-based tax calculation. <strong>Requires Breeze to enable merchant-calculated tax on your account first</strong> — otherwise payments will be rejected. Leave disabled to let Breeze calculate and collect tax.', 'breeze-payment-gateway' ),
+                'description' => __( 'When enabled, the tax WooCommerce calculates for each order is sent to Breeze and shown on the payment page, and Breeze skips its own location-based tax calculation. <strong>Requires Breeze to first enable merchant-calculated tax and turn off Breeze\'s own tax calculation for your account</strong> — otherwise payments will be rejected. Leave disabled to let Breeze calculate and collect tax.', 'breeze-payment-gateway' ),
                 'default'     => 'no',
                 'desc_tip'    => true,
             ),
@@ -1115,12 +1115,13 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
 
         // Check for errors
         if ( is_wp_error( $response ) ) {
-            if ( $this->debug ) {
-                $this->log->error(
-                    sprintf( 'Breeze API Error: %s', $response->get_error_message() ),
-                    array( 'source' => $this->id )
-                );
-            }
+            // Always log transport failures (not just in debug) so a broken
+            // checkout is diagnosable from the WooCommerce logs.
+            $logger = $this->log ? $this->log : wc_get_logger();
+            $logger->error(
+                sprintf( 'Breeze API request failed: %s %s - %s', $method, $url, $response->get_error_message() ),
+                array( 'source' => $this->id )
+            );
             return false;
         }
 
@@ -1141,12 +1142,14 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         if ( $response_code >= 200 && $response_code < 300 ) {
             return $result;
         } else {
-            if ( $this->debug ) {
-                $this->log->error(
-                    sprintf( 'Breeze API Error Response: %d - %s', $response_code, $response_body ),
-                    array( 'source' => $this->id )
-                );
-            }
+            // Always log API error responses (not just in debug) so misconfigurations
+            // — e.g. a merchant not enabled for taxDetails (TAX_DETAILS_NOT_ENABLED) or a
+            // tax/Breeze-tax conflict — are diagnosable without first turning on debug.
+            $logger = $this->log ? $this->log : wc_get_logger();
+            $logger->error(
+                sprintf( 'Breeze API Error Response: %s %s - Status: %d - %s', $method, $url, $response_code, $response_body ),
+                array( 'source' => $this->id )
+            );
             return false;
         }
     }
