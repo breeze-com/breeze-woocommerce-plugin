@@ -1,0 +1,108 @@
+# KITT — mention/label trigger. Canonical template; deployed copy lives in each
+# target repo at .github/workflows/kitt.yml. Edit HERE first, then roll out.
+name: KITT
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [labeled]
+
+# The default GITHUB_TOKEN is read-only context; all writes happen via the
+# breeze-kitt App token minted below.
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+  id-token: write
+
+concurrency:
+  group: kitt-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  kitt:
+    # Load-bearing gate: these are PUBLIC repos — anyone on the internet can
+    # comment. Only org members/owners may summon KITT. Labels are inherently
+    # member-gated (triage permission required to apply them). This gate also
+    # stops KITT's own bot comments from re-triggering runs (association NONE).
+    if: >-
+      (
+        github.event_name == 'issues' &&
+        github.event.label.name == 'kitt'
+      ) || (
+        github.event_name != 'issues' &&
+        contains(github.event.comment.body, '/kitt') &&
+        contains(fromJSON('["MEMBER","OWNER"]'), github.event.comment.author_association)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint breeze-kitt App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.KITT_APP_ID }}
+          private-key: ${{ secrets.KITT_APP_PRIVATE_KEY }}
+          owner: breeze-com
+          repositories: |
+            ${{ github.event.repository.name }}
+            kitt
+
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Fetch KITT memory from hub
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          mkdir -p .kitt
+          gh api "repos/breeze-com/kitt/contents/memory/${{ github.event.repository.name }}.md" \
+            -H "Accept: application/vnd.github.raw" > .kitt/memory.md \
+            || echo "(no memory file yet — first run)" > .kitt/memory.md
+          cp .kitt/memory.md .kitt/memory.orig.md
+
+      - name: Run KITT
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          trigger_phrase: "/kitt"
+          label_trigger: "kitt"
+          branch_prefix: "kitt/"
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 50
+
+      # Write-back is deterministic workflow code, NOT agent privilege: KITT
+      # edits .kitt/memory.md (and optionally .kitt/ledger-row.md) in the
+      # workspace; this step syncs them to the hub with the App token.
+      - name: Sync KITT memory + ledger to hub
+        if: always() && steps.app-token.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -e
+          if [ -f .kitt/memory.md ] && ! cmp -s .kitt/memory.md .kitt/memory.orig.md; then
+            SHA=$(gh api "repos/breeze-com/kitt/contents/memory/${REPO_NAME}.md" --jq .sha 2>/dev/null || true)
+            gh api -X PUT "repos/breeze-com/kitt/contents/memory/${REPO_NAME}.md" \
+              -f message="KITT memory: ${REPO_NAME} (run ${{ github.run_id }})" \
+              -f content="$(base64 -w0 < .kitt/memory.md)" \
+              ${SHA:+-f sha=$SHA} > /dev/null
+            echo "Memory synced."
+          fi
+          if [ -s .kitt/ledger-row.md ]; then
+            gh api "repos/breeze-com/kitt/contents/ledger.md" -H "Accept: application/vnd.github.raw" > .kitt/ledger.md
+            LSHA=$(gh api "repos/breeze-com/kitt/contents/ledger.md" --jq .sha)
+            cat .kitt/ledger-row.md >> .kitt/ledger.md
+            gh api -X PUT "repos/breeze-com/kitt/contents/ledger.md" \
+              -f message="KITT ledger: ${REPO_NAME} (run ${{ github.run_id }})" \
+              -f content="$(base64 -w0 < .kitt/ledger.md)" \
+              -f sha="$LSHA" > /dev/null
+            echo "Ledger row appended."
+          fi
