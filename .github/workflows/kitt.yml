@@ -77,6 +77,7 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 50
+            --append-system-prompt "If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (it is allowlisted), titled '[KITT] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link; the requester may not be an engineer and the loop must close without them clicking anything."
 
       # Write-back is deterministic workflow code, NOT agent privilege: KITT
       # edits .kitt/memory.md (and optionally .kitt/ledger-row.md) in the
