@@ -2,7 +2,7 @@
 /**
  * Tests for build_line_items() — the payload of products/shipping sent to Breeze.
  *
- * Like test-passthrough-fee-crypto.php and unlike the mirror-style helpers in
+ * Like test-crypto-tax.php and unlike the mirror-style helpers in
  * test-gateway.php, these tests load the REAL WC_Breeze_Payment_Gateway class
  * and invoke the actual private method via reflection, so the assertions track
  * production behavior rather than a copy of it. This is the money path: a
