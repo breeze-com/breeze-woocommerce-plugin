@@ -84,6 +84,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     /** @var bool */
     public $send_product_description = false;
 
+    /** @var bool Send WooCommerce-calculated tax to Breeze (merchant-calculated tax mode). */
+    public $merchant_calculated_tax = false;
+
     /** @var string */
     public $flexible_amount_max = '';
 
@@ -150,6 +153,7 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->passthrough_fee_fixed      = $this->get_option( 'passthrough_fee_fixed', '' );
         $this->passthrough_fee_percentage = $this->get_option( 'passthrough_fee_percentage', '' );
         $this->send_product_description = 'yes' === $this->get_option( 'send_product_description', 'no' );
+        $this->merchant_calculated_tax  = 'yes' === $this->get_option( 'merchant_calculated_tax', 'no' );
         $this->flexible_amount_max        = $this->get_option( 'flexible_amount_max' );
         $this->flexible_amount_percentage = $this->get_option( 'flexible_amount_percentage' );
         $this->flexible_amount_fixed      = $this->get_option( 'flexible_amount_fixed' );
@@ -321,6 +325,19 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'label'       => __( 'Send product description to Breeze', 'breeze-payment-gateway' ),
                 'type'        => 'checkbox',
                 'description' => __( 'When enabled, product names from the order will be sent as a description on the Breeze payment page. Useful for merchants who want customers to see a summary of their items on the Breeze checkout.', 'breeze-payment-gateway' ),
+                'default'     => 'no',
+                'desc_tip'    => true,
+            ),
+            'tax_section' => array(
+                'title'       => __( 'Tax', 'breeze-payment-gateway' ),
+                'type'        => 'title',
+                'description' => __( 'Control how tax is handled for Breeze payments.', 'breeze-payment-gateway' ),
+            ),
+            'merchant_calculated_tax' => array(
+                'title'       => __( 'Merchant-Calculated Tax', 'breeze-payment-gateway' ),
+                'label'       => __( 'Send WooCommerce-calculated tax to Breeze', 'breeze-payment-gateway' ),
+                'type'        => 'checkbox',
+                'description' => __( 'When enabled, the tax WooCommerce calculates for each order is sent to Breeze and shown on the payment page, and Breeze skips its own location-based tax calculation. <strong>Requires Breeze to enable merchant-calculated tax on your account first</strong> — otherwise payments will be rejected. Leave disabled to let Breeze calculate and collect tax.', 'breeze-payment-gateway' ),
                 'default'     => 'no',
                 'desc_tip'    => true,
             ),
@@ -806,6 +823,33 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     }
 
     /**
+     * Build the taxDetails payload for merchant-calculated tax.
+     *
+     * Pure helper (no WordPress/WooCommerce dependencies) so it can be unit
+     * tested directly against the real production logic.
+     *
+     * When enabled, the plugin sends WooCommerce's computed tax as a display
+     * line and Breeze skips its own location-based calculation. Line items
+     * stay pre-tax; Breeze derives the charged/settled amount as
+     * Σ(lineItems) + taxDetails.amount. A `0` tax is valid (zero-rated) and is
+     * still sent so the merchant value remains authoritative.
+     *
+     * @param bool  $enabled   Whether merchant-calculated tax is enabled.
+     * @param float $order_tax WooCommerce order total tax in major units.
+     * @return array|null taxDetails array, or null when disabled.
+     */
+    public static function build_tax_details( $enabled, $order_tax ) {
+        if ( ! $enabled ) {
+            return null;
+        }
+
+        return array(
+            'amount' => (int) round( (float) $order_tax * 100 ),
+            'mode'   => 'merchant_handled',
+        );
+    }
+
+    /**
      * Create payment page in Breeze
      *
      * @param WC_Order $order      Order object.
@@ -884,6 +928,25 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             'failReturnUrl'     => $fail_return_url,
             'customer'          => $customer,
         );
+
+        // Append merchant-calculated tax when enabled. Breeze skips its own
+        // location-based calc and derives amount = Σ(lineItems) + taxDetails.amount.
+        // Requires Breeze to have enabled merchant-calculated tax for this
+        // merchant, otherwise the API rejects the request.
+        $tax_details = self::build_tax_details( $this->merchant_calculated_tax, $order->get_total_tax() );
+        if ( null !== $tax_details ) {
+            $payment_data['taxDetails'] = $tax_details;
+
+            if ( $this->debug ) {
+                $this->log->debug(
+                    sprintf(
+                        'Merchant-calculated tax sent: %d minor units (mode = merchant_handled)',
+                        $tax_details['amount']
+                    ),
+                    array( 'source' => $this->id )
+                );
+            }
+        }
 
         // Conditionally append a pass-through fee line item and priceDisplay.isFeeIncluded.
         // When enabled the fee is surfaced as a separate "Processing Fee" line item so the
