@@ -1,5 +1,8 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(php tests/*)"
+    ],
     "deny": [
       "Edit(.github/workflows/**)",
       "Write(.github/workflows/**)",
