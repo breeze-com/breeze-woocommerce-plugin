@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(php tests/*)"
+      "Bash(php tests/*)",
+      "Bash(gh pr create:*)",
+      "Bash(gh pr list:*)"
     ],
     "deny": [
       "Edit(.github/workflows/**)",
