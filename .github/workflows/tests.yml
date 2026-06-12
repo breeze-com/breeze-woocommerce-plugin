@@ -1,0 +1,32 @@
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run test suite
+        run: |
+          failed=0
+          for f in tests/test-*.php; do
+            echo "::group::$f"
+            if ! php "$f"; then
+              failed=1
+              echo "::error file=$f::test script failed"
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
