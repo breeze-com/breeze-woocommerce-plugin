@@ -153,6 +153,20 @@ Refunds must be processed in your Breeze dashboard.
 
 == Changelog ==
 
+= 2.2.0 =
+* New "Merchant-Calculated Tax" setting — send the tax WooCommerce calculates for each order to Breeze and show it on the payment page, with Breeze skipping its own location-based tax calculation (requires Breeze to enable merchant-calculated tax for your account)
+* New "Preferred Crypto Network" and "Preferred Crypto Token" settings — passed through to the Breeze checkout for the crypto deposit flow
+* Preferred Payment Methods now exposes Crypto Wallet and Crypto Deposit as separate options (the legacy `crypto` value is still honored)
+* Breeze API errors are now logged regardless of debug mode, making failed checkouts easier to diagnose
+
+= 2.1.0 =
+* Fix: store all payment page IDs so webhooks reliably match the order across checkout retries
+* Fix: refund the payment page that was actually paid, not the most recently created one
+* Fix: accept return URLs from earlier payment pages when a customer retries checkout
+* Fix: surface duplicate Breeze payments on orders that are already paid
+* Fix: expire sibling payment pages once one is paid
+* Build: exclude dev/test artifacts from the release zip via `.distignore`
+
 = 2.0.1 =
 * Fix: modal now accepts payment-page URLs on any subdomain of `breeze.cash` or `breeze.com` (previously rejected `pay.breeze.com`)
 * Fix: cart is cleared when the customer dismisses the modal after a payment-confirmed event but before the iframe redirect lands — modal now follows the token-protected success return URL so `handle_return()` runs
