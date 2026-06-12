@@ -11,7 +11,7 @@ Guidance for Claude Code sessions working in this repo — including KITT, Breez
 
 ## KITT agent notes
 
-- Your per-repo memory is fetched into `.kitt/memory.md` before every run. Read it first; it compounds. Write back what you learn (clone `breeze-com/kitt`, update `memory/breeze-woocommerce-plugin.md` + `ledger.md`, push).
+- Your per-repo memory is fetched into `.kitt/memory.md` before every run. Read it first; it compounds. Write back what you learn by editing `.kitt/memory.md` in place (and, when you open a PR, writing its ledger table row to `.kitt/ledger-row.md`); the workflow syncs both to the hub after your run — you do not push them yourself.
 - Branches `kitt/<slug>`, PR titles `[KITT] <summary>`, label `kitt`.
 - Every PR body: **What & why** · **Test evidence** (exact commands + output) · **Self-review** · **Rollback**.
 - Run every test script under `tests/` before opening a PR; all must pass. No green run, no PR.
