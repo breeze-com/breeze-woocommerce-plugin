@@ -34,7 +34,7 @@ jobs:
         github.event.label.name == 'kitt'
       ) || (
         github.event_name != 'issues' &&
-        contains(github.event.comment.body, '@kitt') &&
+        contains(github.event.comment.body, '/kitt') &&
         contains(fromJSON('["MEMBER","OWNER"]'), github.event.comment.author_association)
       )
     runs-on: ubuntu-latest
@@ -71,7 +71,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
-          trigger_phrase: "@kitt"
+          trigger_phrase: "/kitt"
           label_trigger: "kitt"
           branch_prefix: "kitt/"
           claude_args: |
