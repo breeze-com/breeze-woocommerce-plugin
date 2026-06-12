@@ -1,8 +1,8 @@
 # Breeze Payment Gateway for WooCommerce
 [![WooCommerce](https://img.shields.io/badge/WooCommerce-6.0%2B-purple.svg)](https://woocommerce.com/)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-blue.svg)](https://php.net/)
-[![Tests](https://img.shields.io/badge/tests-98%20passed%20(262%20assertions)-brightgreen.svg)](#testing)
-[![Version](https://img.shields.io/badge/version-2.1.0-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
+[![Tests](https://img.shields.io/badge/tests-539%20passing-brightgreen.svg)](#testing)
+[![Version](https://img.shields.io/badge/version-2.2.0--rc.1-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
 
 ![Breeze Payment Gateway](.github/images/banner_v2.png)
 
@@ -23,7 +23,7 @@
 - ✅ Multisite compatible
 - ✅ PHP 8.2+ compatible (no dynamic property deprecations)
 - ✅ PII-safe debug logging
-- ✅ 98 unit tests (262 assertions) + E2E test suite
+- ✅ 539 unit-test assertions across 5 suites + E2E test suite
 
 ## Installation
 
@@ -170,15 +170,29 @@ Both **partial** and **full** refunds are supported. Amounts are converted to ce
 
 ## Testing
 
-### Unit Tests — 98 tests, 262 assertions
+### Unit Tests — 539 assertions across 5 suites
 
-Run with no WordPress/WooCommerce runtime:
+Each suite loads the real `WC_Breeze_Payment_Gateway` class with lightweight stubs (no WordPress/WooCommerce runtime) and exits non-zero on failure. They run on every PR and push to `main` via `.github/workflows/tests.yml`.
+
+| Suite | Covers | Assertions |
+|---|---|---|
+| `test-gateway.php` | Core gateway: webhooks, return flow, refunds, signature verification, line items | 398 |
+| `test-v201.php` | v2.0.1 modal checkout, `create_payment_for_order()`, domain allowlist, Apple Pay | 71 |
+| `test-line-items.php` | `build_line_items()` payload — per-unit split, rounding, skips, shipping, entry cap | 45 |
+| `test-crypto-tax.php` | Preferred-crypto param gating + merchant-calculated tax (`taxDetails`) | 13 |
+| `test-webhook-signature.php` | Webhook HMAC-SHA256 verification, recursive key sort, fail-closed cases | 12 |
+
+Run any suite directly, or all of them:
 
 ```bash
 php tests/test-gateway.php
+for f in tests/test-*.php; do php "$f"; done
 ```
 
-#### Complete Test List
+#### Core suite reference (`test-gateway.php`)
+
+_Historical per-test breakdown of the core suite; see the suite summary above for current totals._
+
 
 | # | Test | Assertions |
 |---|------|-----------|
@@ -395,7 +409,7 @@ Note: `amount` is in **cents** (e.g. $559.96 = 55996). The example shows a 20% d
 │   │   └── breeze-blocks.asset.php         # Block asset manifest
 │   └── css/breeze-blocks.css               # Checkout Block styles (checkout-only)
 ├── tests/
-│   └── test-gateway.php                    # Unit tests (98 tests, 262 assertions)
+│   └── test-gateway.php                    # Core unit suite (+ test-v201, test-line-items, test-crypto-tax, test-webhook-signature)
 ├── QA-REPORT.md                            # Security & QA audit report (16 findings)
 ├── languages/breeze-payment-gateway.pot    # Translation template
 ├── uninstall.php                           # Cleanup on uninstall
