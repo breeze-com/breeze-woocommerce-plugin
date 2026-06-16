@@ -122,21 +122,26 @@ jobs:
           REPO_NAME: ${{ github.event.repository.name }}
           OWNER: ${{ github.repository_owner }}
         run: |
-          set -e
+          # Write-back is non-critical: a hiccup logs a ::warning:: but never reds the run.
+          # Everything quoted; explicit sha if/else (no ${VAR:+} word-splitting).
+          put_hub() {  # $1=hub-path  $2=local-file  $3=commit message
+            local b64 sha
+            b64=$(base64 -w0 < "$2") || { echo "::warning::base64 failed for $2"; return 0; }
+            sha=$(gh api "repos/${OWNER}/kitt/contents/$1" --jq .sha 2>/dev/null || true)
+            [ "$sha" = "null" ] && sha=""
+            if [ -n "$sha" ]; then
+              gh api -X PUT "repos/${OWNER}/kitt/contents/$1" -f message="$3" -f content="$b64" -f sha="$sha" >/dev/null \
+                && echo "hub: updated $1" || echo "::warning::hub update failed for $1"
+            else
+              gh api -X PUT "repos/${OWNER}/kitt/contents/$1" -f message="$3" -f content="$b64" >/dev/null \
+                && echo "hub: created $1" || echo "::warning::hub create failed for $1"
+            fi
+          }
           if [ -f .kitt/memory.md ] && ! cmp -s .kitt/memory.md .kitt/memory.orig.md; then
-            SHA=$(gh api "repos/${OWNER}/kitt/contents/memory/${REPO_NAME}.md" --jq .sha 2>/dev/null || true)
-            gh api -X PUT "repos/${OWNER}/kitt/contents/memory/${REPO_NAME}.md" \
-              -f message="KITT memory: ${REPO_NAME} (run ${{ github.run_id }})" \
-              -f content="$(base64 -w0 < .kitt/memory.md)" \
-              ${SHA:+-f sha=$SHA} > /dev/null
-            echo "Memory synced."
+            put_hub "memory/${REPO_NAME}.md" .kitt/memory.md "KITT memory: ${REPO_NAME} (run ${{ github.run_id }})"
           fi
           if [ -s .kitt/ledger-row.md ]; then
-            gh api "repos/${OWNER}/kitt/contents/ledger.md" -H "Accept: application/vnd.github.raw" > .kitt/ledger.md
-            LSHA=$(gh api "repos/${OWNER}/kitt/contents/ledger.md" --jq .sha)
+            gh api "repos/${OWNER}/kitt/contents/ledger.md" -H "Accept: application/vnd.github.raw" > .kitt/ledger.md 2>/dev/null || : > .kitt/ledger.md
             cat .kitt/ledger-row.md >> .kitt/ledger.md
-            gh api -X PUT "repos/${OWNER}/kitt/contents/ledger.md" \
-              -f message="KITT ledger: ${REPO_NAME} (run ${{ github.run_id }})" \
-              -f content="$(base64 -w0 < .kitt/ledger.md)" -f sha="$LSHA" > /dev/null
-            echo "Ledger row appended."
+            put_hub "ledger.md" .kitt/ledger.md "KITT ledger: ${REPO_NAME} (run ${{ github.run_id }})"
           fi
