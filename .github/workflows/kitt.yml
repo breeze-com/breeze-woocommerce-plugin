@@ -1,5 +1,7 @@
-# KITT — mention/label trigger. Canonical template; deployed copy lives in each
-# target repo at .github/workflows/kitt.yml. Edit HERE first, then roll out.
+# KITT — mention/label trigger (HARDENED Jun 16). Two-token split: the agent
+# runs with a token scoped to THIS repo only (no hub), so an injected run
+# cannot write to the shared kitt hub. Hub fetch/write-back use a separate
+# hub-only token the agent never sees. Rails ride in this workflow.
 name: KITT
 
 on:
@@ -10,8 +12,6 @@ on:
   issues:
     types: [labeled]
 
-# The default GITHUB_TOKEN is read-only context; all writes happen via the
-# breeze-kitt App token minted below.
 permissions:
   contents: read
   pull-requests: read
@@ -24,10 +24,6 @@ concurrency:
 
 jobs:
   kitt:
-    # Load-bearing gate: these are PUBLIC repos — anyone on the internet can
-    # comment. Only org members/owners may summon KITT. Labels are inherently
-    # member-gated (triage permission required to apply them). This gate also
-    # stops KITT's own bot comments from re-triggering runs (association NONE).
     if: >-
       (
         github.event_name == 'issues' &&
@@ -40,28 +36,67 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Mint breeze-kitt App token
+      - name: Mint hub token (fetch + write-back ONLY; never exposed to the agent)
+        id: hub-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.KITT_APP_ID }}
+          private-key: ${{ secrets.KITT_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: kitt
+
+      - name: Mint repo token (the agent runs with THIS — this repo only, no hub)
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ vars.KITT_APP_ID }}
           private-key: ${{ secrets.KITT_APP_PRIVATE_KEY }}
-          owner: breeze-com
-          repositories: |
-            ${{ github.event.repository.name }}
-            kitt
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
 
       - uses: actions/checkout@v6
         with:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
+      - name: Write KITT permission policy (workflow-borne, run-scoped)
+        run: |
+          mkdir -p "$RUNNER_TEMP/kitt"
+          cat > "$RUNNER_TEMP/kitt/settings.json" <<'JSON'
+          {
+            "permissions": {
+              "allow": [
+                "Read", "Glob", "Grep", "Edit", "Write",
+                "Bash(npm test:*)", "Bash(npm run:*)", "Bash(npm ci:*)", "Bash(npm install:*)",
+                "Bash(npx vitest:*)", "Bash(npx jest:*)", "Bash(npx tsc:*)", "Bash(node:*)",
+                "Bash(python3:*)", "Bash(pytest:*)", "Bash(python3 -m pytest:*)", "Bash(pip install:*)",
+                "Bash(go test:*)", "Bash(cargo test:*)", "Bash(dotnet test:*)",
+                "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+                "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git branch:*)",
+                "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push:*)",
+                "Bash(gh pr create:*)", "Bash(gh pr list:*)", "Bash(gh pr view:*)",
+                "Bash(gh issue list:*)", "Bash(gh issue view:*)", "Bash(gh issue comment:*)"
+              ],
+              "deny": [
+                "Edit(.github/workflows/**)", "Write(.github/workflows/**)", "Read(.github/workflows/**)",
+                "Read(.env)", "Read(**/.env)", "Read(**/.env.*)", "Read(.env.*)",
+                "Read(**/*.pem)", "Read(**/*.key)", "Read(**/*.p12)", "Read(**/*.pfx)",
+                "Read(**/.npmrc)", "Read(**/.netrc)", "Read(**/service-account*.json)",
+                "Read(**/*secret*)", "Read(**/*credential*)",
+                "Bash(git merge:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git remote:*)",
+                "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(scp:*)",
+                "WebFetch", "WebSearch"
+              ]
+            }
+          }
+          JSON
+
       - name: Fetch KITT memory from hub
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
         run: |
           mkdir -p .kitt
-          gh api "repos/breeze-com/kitt/contents/memory/${{ github.event.repository.name }}.md" \
+          gh api "repos/${{ github.repository_owner }}/kitt/contents/memory/${{ github.event.repository.name }}.md" \
             -H "Accept: application/vnd.github.raw" > .kitt/memory.md \
             || echo "(no memory file yet — first run)" > .kitt/memory.md
           cp .kitt/memory.md .kitt/memory.orig.md
@@ -77,33 +112,31 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 50
-            --append-system-prompt "If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (it is allowlisted), titled '[KITT] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link; the requester may not be an engineer and the loop must close without them clicking anything."
+            --settings ${{ runner.temp }}/kitt/settings.json
+            --append-system-prompt "You are KITT, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'kitt/'. Do not touch .github/workflows, secrets, deploy config, or the kitt hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[KITT] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link."
 
-      # Write-back is deterministic workflow code, NOT agent privilege: KITT
-      # edits .kitt/memory.md (and optionally .kitt/ledger-row.md) in the
-      # workspace; this step syncs them to the hub with the App token.
       - name: Sync KITT memory + ledger to hub
-        if: always() && steps.app-token.outputs.token != ''
+        if: always() && steps.hub-token.outputs.token != ''
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
           REPO_NAME: ${{ github.event.repository.name }}
+          OWNER: ${{ github.repository_owner }}
         run: |
           set -e
           if [ -f .kitt/memory.md ] && ! cmp -s .kitt/memory.md .kitt/memory.orig.md; then
-            SHA=$(gh api "repos/breeze-com/kitt/contents/memory/${REPO_NAME}.md" --jq .sha 2>/dev/null || true)
-            gh api -X PUT "repos/breeze-com/kitt/contents/memory/${REPO_NAME}.md" \
+            SHA=$(gh api "repos/${OWNER}/kitt/contents/memory/${REPO_NAME}.md" --jq .sha 2>/dev/null || true)
+            gh api -X PUT "repos/${OWNER}/kitt/contents/memory/${REPO_NAME}.md" \
               -f message="KITT memory: ${REPO_NAME} (run ${{ github.run_id }})" \
               -f content="$(base64 -w0 < .kitt/memory.md)" \
               ${SHA:+-f sha=$SHA} > /dev/null
             echo "Memory synced."
           fi
           if [ -s .kitt/ledger-row.md ]; then
-            gh api "repos/breeze-com/kitt/contents/ledger.md" -H "Accept: application/vnd.github.raw" > .kitt/ledger.md
-            LSHA=$(gh api "repos/breeze-com/kitt/contents/ledger.md" --jq .sha)
+            gh api "repos/${OWNER}/kitt/contents/ledger.md" -H "Accept: application/vnd.github.raw" > .kitt/ledger.md
+            LSHA=$(gh api "repos/${OWNER}/kitt/contents/ledger.md" --jq .sha)
             cat .kitt/ledger-row.md >> .kitt/ledger.md
-            gh api -X PUT "repos/breeze-com/kitt/contents/ledger.md" \
+            gh api -X PUT "repos/${OWNER}/kitt/contents/ledger.md" \
               -f message="KITT ledger: ${REPO_NAME} (run ${{ github.run_id }})" \
-              -f content="$(base64 -w0 < .kitt/ledger.md)" \
-              -f sha="$LSHA" > /dev/null
+              -f content="$(base64 -w0 < .kitt/ledger.md)" -f sha="$LSHA" > /dev/null
             echo "Ledger row appended."
           fi
