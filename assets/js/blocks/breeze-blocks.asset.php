@@ -6,5 +6,5 @@ return array(
         'wp-element',
         'wp-html-entities',
     ),
-    'version' => '2.2.0-rc.1',
+    'version' => '2.2.0',
 );
