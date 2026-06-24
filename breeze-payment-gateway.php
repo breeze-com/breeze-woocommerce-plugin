@@ -49,6 +49,7 @@ if ( ! in_array( 'woocommerce/woocommerce.php', $active_plugins ) ) {
 add_filter( 'woocommerce_payment_gateways', 'breeze_add_payment_gateway' );
 function breeze_add_payment_gateway( $gateways ) {
     $gateways[] = 'WC_Breeze_Payment_Gateway';
+    $gateways[] = 'WC_Breeze_Subscription_Gateway';
     return $gateways;
 }
 
@@ -66,6 +67,7 @@ function breeze_payment_gateway_init() {
         return;
     }
     require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-payment-gateway.php';
+    require_once BREEZE_PAYMENT_GATEWAY_PLUGIN_DIR . 'includes/class-wc-breeze-subscription-gateway.php';
 
     // Conditionally bootstrap the modal checkout integration. Reading the
     // option directly avoids instantiating the gateway here — WooCommerce
@@ -110,6 +112,32 @@ function breeze_payment_gateway_action_links( $links ) {
         '<a href="' . admin_url( 'admin.php?page=wc-settings&tab=checkout&section=breeze_payment_gateway' ) . '">' . __( 'Settings', 'breeze-payment-gateway' ) . '</a>',
     );
     return array_merge( $plugin_links, $links );
+}
+
+/**
+ * Add "Breeze Price ID" field to the General product data tab.
+ * When set, the product is treated as a subscription product by the gateway.
+ */
+add_action( 'woocommerce_product_options_general_product_data', 'breeze_add_price_id_field' );
+function breeze_add_price_id_field() {
+    woocommerce_wp_text_input( array(
+        'id'          => '_breeze_price_id',
+        'label'       => __( 'Breeze Price ID', 'breeze-payment-gateway' ),
+        'description' => __( 'Enter the Breeze Price ID to treat this product as a subscription. Leave blank for one-time payments.', 'breeze-payment-gateway' ),
+        'desc_tip'    => true,
+        'placeholder' => 'price_...',
+    ) );
+}
+
+/**
+ * Save the Breeze Price ID product meta field.
+ *
+ * @param int $post_id Product post ID.
+ */
+add_action( 'woocommerce_process_product_meta', 'breeze_save_price_id_field' );
+function breeze_save_price_id_field( $post_id ) {
+    $value = isset( $_POST['_breeze_price_id'] ) ? sanitize_text_field( wp_unslash( $_POST['_breeze_price_id'] ) ) : '';
+    update_post_meta( $post_id, '_breeze_price_id', $value );
 }
 
 /**
