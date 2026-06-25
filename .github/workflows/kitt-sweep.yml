@@ -34,8 +34,8 @@ jobs:
         id: hub-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.KITT_APP_ID }}
-          private-key: ${{ secrets.KITT_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: case
 
@@ -43,8 +43,8 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.KITT_APP_ID }}
-          private-key: ${{ secrets.KITT_APP_PRIVATE_KEY }}
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ steps.repo.outputs.name }}
 
