@@ -70,14 +70,16 @@ function wc_get_order( $id ) {
     return $wc_order_stub;
 }
 
-// HTTP stubs — capture url + body; return configured response.
+// HTTP stubs — capture url, body, and full args; return configured response.
 $http_response_stub = null;
 $last_request_url   = '';
 $last_request_body  = '';
+$last_request_args  = array();
 function wp_remote_request( $url, $args ) {
-    global $http_response_stub, $last_request_url, $last_request_body;
+    global $http_response_stub, $last_request_url, $last_request_body, $last_request_args;
     $last_request_url  = $url;
     $last_request_body = isset( $args['body'] ) ? $args['body'] : '';
+    $last_request_args = $args;
     return $http_response_stub;
 }
 function wp_remote_retrieve_response_code( $response ) {
@@ -199,10 +201,15 @@ $wc_order_stub = new Breeze_Refund_Order_Stub( 30, 'pp_txn_winner', array(
 ) );
 $http_response_stub = $ok_response;
 $last_request_url   = '';
+$last_request_args  = array();
 $r = make_refund_gateway()->process_refund( 30, 5.00 );
 check_eq( true, $r,                                            'transaction_id + meta both present → succeeds' );
 check( strpos( $last_request_url, 'pp_txn_winner'  ) !== false, 'request URL uses transaction_id' );
 check( strpos( $last_request_url, 'pp_meta_loser' ) === false,  'request URL does not use meta page_id' );
+check_eq( 'POST', $last_request_args['method'],                'refund request uses POST' );
+check( isset( $last_request_args['headers']['Authorization'] )
+    && strpos( $last_request_args['headers']['Authorization'], 'Basic ' ) === 0,
+    'refund request sends Basic auth header' );
 
 // transaction_id absent — falls back to meta.
 $wc_order_stub = new Breeze_Refund_Order_Stub( 31, '', array(
@@ -223,6 +230,18 @@ $http_response_stub = array( 'code' => 422, 'body' => json_encode( array( 'error
 $r = make_refund_gateway()->process_refund( 40, 10.00 );
 check( $r instanceof WP_Error,       'API 422 → WP_Error' );
 check_eq( 'refund_failed', $r->code, 'error code is refund_failed' );
+
+// ─── Group 5b: transport failure (network/timeout) ────────────────────────────
+
+echo "\n🧪 Transport failure (network error) → WP_Error\n";
+
+// breeze_api_request() returns false when is_wp_error($response); a regression
+// returning the WP_Error object directly would make !$result false and fake success.
+$wc_order_stub      = new Breeze_Refund_Order_Stub( 41, 'pp_timeout', array() );
+$http_response_stub = new WP_Error( 'http_request_failed', 'Connection timed out' );
+$r = make_refund_gateway()->process_refund( 41, 5.00, '' );
+check( $r instanceof WP_Error,          'transport failure → WP_Error (not a faked success)' );
+check( empty( $wc_order_stub->notes ), 'transport failure → no success note added' );
 
 // ─── Group 6: refund ID extraction ───────────────────────────────────────────
 
@@ -249,8 +268,9 @@ echo "\n🧪 Refund ID extraction: no id in response → N/A in note\n";
 $wc_order_stub      = new Breeze_Refund_Order_Stub( 52, 'pp_r52', array() );
 $http_response_stub = array( 'code' => 200, 'body' => '{"status":"ok"}' );
 $r = make_refund_gateway()->process_refund( 52, 1.00 );
-check_eq( true, $r,                                             'no id in response → still true' );
-check( strpos( $wc_order_stub->notes[0], 'N/A' ) !== false,    'order note says N/A when no refund ID returned' );
+check_eq( true, $r,                                                                     'no id in response → still true' );
+check( strpos( $wc_order_stub->notes[0], 'Refund ID: N/A' ) !== false, 'no refund ID in response → note says "Refund ID: N/A"' );
+check( strpos( $wc_order_stub->notes[0], 'ref_' ) === false,           'no stray refund ID leaked into the note' );
 
 // ─── Group 7: amount converted to minor units ─────────────────────────────────
 
