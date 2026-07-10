@@ -191,6 +191,12 @@ $gw = make_gateway();
 
 echo "\n🧪 order_id validation\n";
 
+// Valid order present so a cart-redirect here proves the order_id guard
+// specifically — not the order-not-found fallback.
+$wc_order_stub = new Breeze_Return_Order_Stub( 1, array(
+    '_breeze_return_tokens' => array( 'tok' ),
+) );
+
 $_GET = array();
 check_eq( 'https://example.com/cart', call_handle_return( $gw ),
     'Missing order_id in $_GET → redirect to cart' );
@@ -213,26 +219,48 @@ check_eq( 'https://example.com/cart', call_handle_return( $gw ),
 echo "\n🧪 Token verification\n";
 
 // No tokens stored and no token supplied → token_matches stays false.
-$wc_order_stub = new Breeze_Return_Order_Stub( 10 );
+$order10 = new Breeze_Return_Order_Stub( 10 );
+$wc_order_stub = $order10;
 $_GET = array( 'order_id' => '10', 'status' => 'success' );
 check_eq( 'https://example.com/cart', call_handle_return( $gw ),
     'No stored tokens, no token in GET → redirect to cart' );
+check( empty( $order10->deleted_meta ),
+    'No stored tokens → tokens NOT consumed' );
+check_eq( 0, $order10->save_count,
+    'No stored tokens → save() NOT called' );
+check( empty( $order10->status_updates ),
+    'No stored tokens → status NOT changed' );
 
 // Token present in GET but does not match stored list.
-$wc_order_stub = new Breeze_Return_Order_Stub( 11, array(
+$order11 = new Breeze_Return_Order_Stub( 11, array(
     '_breeze_return_tokens' => array( 'correct_token' ),
 ) );
+$wc_order_stub = $order11;
 $_GET = array( 'order_id' => '11', 'status' => 'success', 'token' => 'wrong_token' );
 check_eq( 'https://example.com/cart', call_handle_return( $gw ),
     'Mismatched token → redirect to cart' );
+// Security: a rejected token must leave the order untouched.
+check( empty( $order11->deleted_meta ),
+    'Mismatched token → tokens NOT consumed' );
+check_eq( 0, $order11->save_count,
+    'Mismatched token → save() NOT called' );
+check( empty( $order11->status_updates ),
+    'Mismatched token → status NOT changed' );
 
 // Empty token in GET — !empty('') is false, so hash_equals loop is skipped.
-$wc_order_stub = new Breeze_Return_Order_Stub( 12, array(
+$order12 = new Breeze_Return_Order_Stub( 12, array(
     '_breeze_return_tokens' => array( 'some_token' ),
 ) );
+$wc_order_stub = $order12;
 $_GET = array( 'order_id' => '12', 'status' => 'success', 'token' => '' );
 check_eq( 'https://example.com/cart', call_handle_return( $gw ),
     'Empty token in GET → token_matches stays false → redirect to cart' );
+check( empty( $order12->deleted_meta ),
+    'Empty token → tokens NOT consumed' );
+check_eq( 0, $order12->save_count,
+    'Empty token → save() NOT called' );
+check( empty( $order12->status_updates ),
+    'Empty token → status NOT changed' );
 
 // Token matches an entry in the cumulative list → proceeds to success path.
 $wc_order_stub = new Breeze_Return_Order_Stub( 13, array(
@@ -326,6 +354,10 @@ check( ! empty( $wc_notices ) && 'error' === $wc_notices[0]['type'],
     'Fail path: error notice added' );
 check( ! empty( $wc_notices ) && 'Payment was not completed.' === $wc_notices[0]['message'],
     'Fail path: notice message is "Payment was not completed."' );
+check( in_array( '_breeze_return_tokens', $order30->deleted_meta, true ),
+    'Fail path: _breeze_return_tokens deleted (token consumed even on failure)' );
+check( $order30->save_count >= 1,
+    'Fail path: save() called to persist token deletion' );
 
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
