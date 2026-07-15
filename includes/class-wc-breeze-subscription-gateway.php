@@ -42,6 +42,13 @@ class WC_Breeze_Subscription_Gateway extends WC_Breeze_Payment_Gateway {
 		$this->init_form_fields();
 		$this->init_settings();
 
+		// Re-derive the runtime credentials (api_key, webhook_secret, enabled,
+		// testmode, debug, ...) from THIS gateway's settings. parent::__construct()
+		// already derived them under the base gateway id 'breeze_payment_gateway';
+		// without this the subscription gateway would authenticate with the base
+		// gateway's key (empty/wrong when only the subscription gateway is set up).
+		$this->load_runtime_settings();
+
 		// Re-bind settings save action to the correct gateway ID.
 		add_action(
 			'woocommerce_update_options_payment_gateways_' . $this->id,

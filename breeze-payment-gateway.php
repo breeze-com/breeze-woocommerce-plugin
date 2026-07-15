@@ -115,29 +115,44 @@ function breeze_payment_gateway_action_links( $links ) {
 }
 
 /**
- * Add "Breeze Price ID" field to the General product data tab.
- * When set, the product is treated as a subscription product by the gateway.
+ * Add the Breeze subscription fields to the General product data tab.
+ *
+ * A product is treated as a subscription only when BOTH the Breeze Price ID
+ * and Breeze Product ID are set — the Breeze POST /v1/subscriptions API
+ * requires both. Leaving either blank keeps the product on the one-time
+ * payment-page flow.
  */
-add_action( 'woocommerce_product_options_general_product_data', 'breeze_add_price_id_field' );
-function breeze_add_price_id_field() {
+add_action( 'woocommerce_product_options_general_product_data', 'breeze_add_subscription_fields' );
+function breeze_add_subscription_fields() {
     woocommerce_wp_text_input( array(
         'id'          => '_breeze_price_id',
         'label'       => __( 'Breeze Price ID', 'breeze-payment-gateway' ),
-        'description' => __( 'Enter the Breeze Price ID to treat this product as a subscription. Leave blank for one-time payments.', 'breeze-payment-gateway' ),
+        'description' => __( 'Enter the Breeze Price ID to treat this product as a subscription. Requires the Breeze Product ID below. Leave blank for one-time payments.', 'breeze-payment-gateway' ),
         'desc_tip'    => true,
         'placeholder' => 'price_...',
+    ) );
+
+    woocommerce_wp_text_input( array(
+        'id'          => '_breeze_product_id',
+        'label'       => __( 'Breeze Product ID', 'breeze-payment-gateway' ),
+        'description' => __( 'Enter the Breeze Product ID that the Price ID above belongs to. Required for subscription checkout.', 'breeze-payment-gateway' ),
+        'desc_tip'    => true,
+        'placeholder' => 'prod_...',
     ) );
 }
 
 /**
- * Save the Breeze Price ID product meta field.
+ * Save the Breeze subscription product meta fields.
  *
  * @param int $post_id Product post ID.
  */
-add_action( 'woocommerce_process_product_meta', 'breeze_save_price_id_field' );
-function breeze_save_price_id_field( $post_id ) {
-    $value = isset( $_POST['_breeze_price_id'] ) ? sanitize_text_field( wp_unslash( $_POST['_breeze_price_id'] ) ) : '';
-    update_post_meta( $post_id, '_breeze_price_id', $value );
+add_action( 'woocommerce_process_product_meta', 'breeze_save_subscription_fields' );
+function breeze_save_subscription_fields( $post_id ) {
+    $price_id = isset( $_POST['_breeze_price_id'] ) ? sanitize_text_field( wp_unslash( $_POST['_breeze_price_id'] ) ) : '';
+    update_post_meta( $post_id, '_breeze_price_id', $price_id );
+
+    $product_id = isset( $_POST['_breeze_product_id'] ) ? sanitize_text_field( wp_unslash( $_POST['_breeze_product_id'] ) ) : '';
+    update_post_meta( $post_id, '_breeze_product_id', $product_id );
 }
 
 /**
