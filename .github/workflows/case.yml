@@ -107,6 +107,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: "/case"
+          allowed_bots: "breeze-case-bridge"
           label_trigger: "case"
           branch_prefix: "case/"
           claude_args: |
@@ -145,3 +146,18 @@ jobs:
             cat .case/ledger-row.md >> .case/ledger.md
             put_hub "ledger.md" .case/ledger.md "CASE ledger: ${REPO_NAME} (run ${{ github.run_id }})"
           fi
+
+      - name: Report run failure on the triggering thread
+        # Closes the silent-death gap: if any step above failed, tell the
+        # requester on the issue/PR that summoned CASE. Posts as the breeze-case
+        # App (repo-scoped token) — body has no "/case", so it cannot self-trigger.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          NUM="${{ github.event.issue.number || github.event.pull_request.number }}"
+          [ -z "$NUM" ] && exit 0
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${{ github.repository }}/issues/${NUM}/comments" \
+            -f body="CASE run failed: ${RUN_URL} — the request did not complete. cc the requester if one is named in the issue body." >/dev/null \
+            || echo "::warning::could not post failure comment"
