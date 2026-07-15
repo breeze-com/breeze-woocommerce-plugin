@@ -1107,8 +1107,13 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             // Payment failed
             $order->update_status( 'failed', __( 'Payment failed or cancelled by customer.', 'breeze-payment-gateway' ) );
 
-            // Remove cart
-            WC()->cart->empty_cart();
+            // Remove cart. WC()->cart can be null on a wc-api request (the cart
+            // is loaded on wp_loaded, which does not reliably run for this
+            // context), so guard it exactly like the success path above —
+            // otherwise the failed-payment redirect fatals.
+            if ( WC()->cart ) {
+                WC()->cart->empty_cart();
+            }
 
             // Log failure
             if ( $this->debug ) {

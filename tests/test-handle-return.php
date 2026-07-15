@@ -359,6 +359,50 @@ check( in_array( '_breeze_return_tokens', $order30->deleted_meta, true ),
 check( $order30->save_count >= 1,
     'Fail path: save() called to persist token deletion' );
 
+// ─── Group 7: Null cart (wc-api requests may have no cart) ─────────────────────
+//
+// WC()->cart is null on a wc-api request where the cart was not loaded. Both
+// return paths must tolerate this. Before the guard was mirrored onto the fail
+// path, this test fatalled with "Call to a member function empty_cart() on null"
+// (see issue #40).
+
+echo "\n🧪 Null cart\n";
+
+function reset_cart_null() {
+    global $breeze_wc_instance;
+    $breeze_wc_instance = new Breeze_Test_WC();
+    $breeze_wc_instance->cart = null;
+}
+
+// Fail path with a null cart — the regression this fix targets.
+$order40 = new Breeze_Return_Order_Stub( 40, array(
+    '_breeze_return_tokens' => array( 'tok40' ),
+), false );
+$wc_order_stub = $order40;
+reset_cart_null();
+reset_notices();
+$_GET = array( 'order_id' => '40', 'status' => 'failed', 'token' => 'tok40' );
+$redirect40 = call_handle_return( $gw );
+
+check_eq( 'https://example.com/checkout', $redirect40,
+    'Fail path + null cart: redirects to checkout (does not fatal)' );
+check( ! empty( $order40->status_updates ) && 'failed' === $order40->status_updates[0][0],
+    'Fail path + null cart: order status still set to failed' );
+check( ! empty( $wc_notices ) && 'Payment was not completed.' === $wc_notices[0]['message'],
+    'Fail path + null cart: "Payment was not completed." notice still added' );
+
+// Success path with a null cart — already guarded; asserts parity.
+$order41 = new Breeze_Return_Order_Stub( 41, array(
+    '_breeze_return_tokens' => array( 'tok41' ),
+), false );
+$wc_order_stub = $order41;
+reset_cart_null();
+$_GET = array( 'order_id' => '41', 'status' => 'success', 'token' => 'tok41' );
+$redirect41 = call_handle_return( $gw );
+
+check( ! empty( $order41->status_updates ) && 'on-hold' === $order41->status_updates[0][0],
+    'Success path + null cart: status set to on-hold (does not fatal)' );
+
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo "\n" . str_repeat( '━', 32 ) . "\n";
