@@ -117,7 +117,30 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->init_form_fields();
         $this->init_settings();
 
-        // Define user set variables
+        // Derive the runtime properties from the loaded settings.
+        $this->load_runtime_settings();
+
+        // Actions
+        add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'process_admin_options' ) );
+        add_action( 'woocommerce_api_' . $this->id, array( $this, 'webhook_handler' ) );
+        
+        // Return URL handler
+        add_action( 'woocommerce_api_breeze_return', array( $this, 'handle_return' ) );
+
+        // Constrain the icon to 24x24px on the checkout payment methods list
+        add_filter( 'woocommerce_gateway_icon', array( $this, 'filter_gateway_icon_html' ), 10, 2 );
+    }
+
+    /**
+     * Derive the gateway's runtime properties from the loaded settings.
+     *
+     * Kept separate from the constructor so subclasses (e.g. the subscription
+     * gateway) can re-run it after switching `$this->id` and reloading settings
+     * under their own option key — otherwise they would inherit the base
+     * gateway's API key / webhook secret and authenticate with the wrong (or an
+     * empty) credential when configured independently.
+     */
+    protected function load_runtime_settings() {
         $this->title              = $this->get_option( 'title' );
         $this->description        = $this->get_option( 'description' );
         $this->enabled            = $this->get_option( 'enabled' );
@@ -135,19 +158,9 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
         $this->flexible_amount_fixed      = $this->get_option( 'flexible_amount_fixed' );
         $checkout_display                 = $this->get_option( 'checkout_display', 'redirect' );
         $this->checkout_display           = ( 'modal' === $checkout_display ) ? 'modal' : 'redirect';
-        
+
         // Logging
         $this->log = $this->debug ? wc_get_logger() : null;
-
-        // Actions
-        add_action( 'woocommerce_update_options_payment_gateways_' . $this->id, array( $this, 'process_admin_options' ) );
-        add_action( 'woocommerce_api_' . $this->id, array( $this, 'webhook_handler' ) );
-        
-        // Return URL handler
-        add_action( 'woocommerce_api_breeze_return', array( $this, 'handle_return' ) );
-
-        // Constrain the icon to 24x24px on the checkout payment methods list
-        add_filter( 'woocommerce_gateway_icon', array( $this, 'filter_gateway_icon_html' ), 10, 2 );
     }
 
     /**
@@ -438,6 +451,21 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
                 'result'   => 'failure',
                 'messages' => array( __( 'Invalid order.', 'breeze-payment-gateway' ) ),
             );
+        }
+
+        // Route to subscription checkout when the order contains a Breeze
+        // subscription product. Unsupported carts (mixed, multiple/qty>1,
+        // misconfigured) are surfaced to the customer here.
+        $subscription = $this->get_subscription_context( $order );
+        if ( $subscription['is_subscription'] ) {
+            if ( $subscription['error'] ) {
+                wc_add_notice( $subscription['error'], 'error' );
+                return array(
+                    'result'   => 'failure',
+                    'messages' => array( $subscription['error'] ),
+                );
+            }
+            return $this->create_subscription_checkout( $order );
         }
 
         $result = $this->create_payment_for_order( $order );
@@ -1295,17 +1323,25 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
             $data = $webhook_data['data'];
             
             switch ( $event_type ) {
-                
+
                 case 'payment.succeeded':
                 case 'PAYMENT_SUCCEEDED':
                     $this->handle_payment_success_webhook( $data );
                     break;
-                
+
                 case 'payment.failed':
                 case 'PAYMENT_EXPIRED':
                     $this->handle_payment_failed_webhook( $data );
                     break;
-                
+
+                case 'SUBSCRIPTION_STATUS_UPDATED':
+                    $this->handle_subscription_status_updated_webhook( $data );
+                    break;
+
+                case 'INVOICE_STATUS_UPDATED':
+                    $this->handle_invoice_status_updated_webhook( $data );
+                    break;
+
                 default:
                     // Log unknown event
                     if ( $this->debug ) {
@@ -1676,5 +1712,563 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
      */
     public function is_blocks_supported() {
         return true;
+    }
+
+    /**
+     * Create a Breeze subscription checkout session for an order containing
+     * a subscription product (identified by the `_breeze_price_id` meta).
+     *
+     * Calls POST /v1/subscriptions and redirects the customer to the returned
+     * `checkoutUrl`. The Breeze subscription ID is persisted on the order as
+     * `_breeze_subscription_id` for later webhook correlation.
+     *
+     * @param WC_Order $order WooCommerce order containing the subscription product.
+     * @return array WooCommerce process_payment result array.
+     */
+    protected function create_subscription_checkout( $order ) {
+
+        // Resolve and validate the subscription line (single price/product,
+        // quantity 1, both Breeze IDs present).
+        $subscription = $this->get_subscription_context( $order );
+
+        if ( ! $subscription['is_subscription'] || $subscription['error'] ) {
+            $message = $subscription['error']
+                ? $subscription['error']
+                : __( 'No Breeze subscription product found in this order.', 'breeze-payment-gateway' );
+            wc_add_notice( $message, 'error' );
+            return array(
+                'result'   => 'failure',
+                'messages' => array( $message ),
+            );
+        }
+
+        // POST /v1/subscriptions requires an existing Breeze customer, so
+        // resolve (creating if needed) the customer before creating the sub.
+        $customer_id = $this->resolve_breeze_customer_id( $order );
+        if ( ! $customer_id ) {
+            wc_add_notice( __( 'Payment error: could not set up your Breeze customer profile. Please try again.', 'breeze-payment-gateway' ), 'error' );
+            return array(
+                'result'   => 'failure',
+                'messages' => array( __( 'Could not create Breeze customer.', 'breeze-payment-gateway' ) ),
+            );
+        }
+
+        // Generate a one-time return token (same pattern as payment page flow).
+        $return_token = wp_generate_password( 32, false );
+        $order->update_meta_data( '_breeze_return_token', $return_token );
+        $all_tokens = $order->get_meta( '_breeze_return_tokens' );
+        if ( ! is_array( $all_tokens ) ) {
+            $all_tokens = array();
+        }
+        if ( ! in_array( $return_token, $all_tokens, true ) ) {
+            $all_tokens[] = $return_token;
+        }
+        $order->update_meta_data( '_breeze_return_tokens', $all_tokens );
+        $order->save();
+
+        $success_return_url = add_query_arg(
+            array(
+                'wc-api'   => 'breeze_return',
+                'order_id' => $order->get_id(),
+                'status'   => 'success',
+                'token'    => $return_token,
+            ),
+            home_url( '/' )
+        );
+
+        $fail_return_url = add_query_arg(
+            array(
+                'wc-api'   => 'breeze_return',
+                'order_id' => $order->get_id(),
+                'status'   => 'failed',
+                'token'    => $return_token,
+            ),
+            home_url( '/' )
+        );
+
+        // Both productId and priceId are required by POST /v1/subscriptions,
+        // and the customer must be referenced by id (not email). Crypto is
+        // intentionally excluded — subscriptions are fiat-only.
+        $subscription_data = array(
+            'clientReferenceId'       => 'order-' . $order->get_id(),
+            'productId'               => $subscription['product_id'],
+            'priceId'                 => $subscription['price_id'],
+            'customer'                => array( 'id' => $customer_id ),
+            'preferredPaymentMethods' => array( 'card', 'apple_pay', 'google_pay' ),
+            'successReturnUrl'        => $success_return_url,
+            'failReturnUrl'           => $fail_return_url,
+        );
+
+        $result = $this->breeze_api_request( 'POST', '/v1/subscriptions', $subscription_data );
+
+        // The API returns { id, url }; `url` is the first invoice's hosted
+        // payment page to redirect the customer to.
+        if ( ! $result || empty( $result['url'] ) ) {
+            wc_add_notice( __( 'Payment error: failed to create Breeze subscription checkout.', 'breeze-payment-gateway' ), 'error' );
+            return array(
+                'result'   => 'failure',
+                'messages' => array( __( 'Failed to create Breeze subscription checkout.', 'breeze-payment-gateway' ) ),
+            );
+        }
+
+        // Persist the Breeze subscription ID for webhook correlation, and flag
+        // this as the original subscription order (renewals carry the same
+        // subscription id, so this distinguishes the first order from renewals).
+        if ( ! empty( $result['id'] ) ) {
+            $order->update_meta_data( '_breeze_subscription_id', $result['id'] );
+        }
+        $order->update_meta_data( '_breeze_is_subscription_order', 'yes' );
+        $order->save();
+
+        $order->update_status( 'pending', __( 'Awaiting Breeze subscription payment.', 'breeze-payment-gateway' ) );
+
+        return array(
+            'result'   => 'success',
+            'redirect' => $result['url'],
+        );
+    }
+
+    /**
+     * Inspect an order's line items for a Breeze subscription product.
+     *
+     * A product is a subscription only when it carries BOTH `_breeze_price_id`
+     * and `_breeze_product_id`. The Breeze subscriptions API models exactly one
+     * price per subscription (no quantity multiplier, no multiple products), so
+     * this enforces a single subscription line at quantity 1 and blocks mixed
+     * carts.
+     *
+     * @param WC_Order $order Order to inspect.
+     * @return array {
+     *     @type bool   $is_subscription Whether the order contains a subscription product.
+     *     @type string $price_id        Breeze Price ID (only set when the cart is valid).
+     *     @type string $product_id      Breeze Product ID (only set when the cart is valid).
+     *     @type string $error           User-facing error when the cart is unsupported ('' when OK).
+     * }
+     */
+    private function get_subscription_context( $order ) {
+        $sub_lines       = array();
+        $has_other_items = false;
+        $total_sub_qty   = 0;
+
+        foreach ( $order->get_items() as $item ) {
+            $product_ref = $item->get_product_id();
+            $price_id    = get_post_meta( $product_ref, '_breeze_price_id', true );
+
+            if ( $price_id ) {
+                $sub_lines[]    = array(
+                    'price_id'   => $price_id,
+                    'product_id' => get_post_meta( $product_ref, '_breeze_product_id', true ),
+                );
+                $total_sub_qty += (int) $item->get_quantity();
+            } else {
+                $has_other_items = true;
+            }
+        }
+
+        $context = array(
+            'is_subscription' => ! empty( $sub_lines ),
+            'price_id'        => '',
+            'product_id'      => '',
+            'error'           => '',
+        );
+
+        if ( empty( $sub_lines ) ) {
+            return $context;
+        }
+
+        // Subscriptions must be purchased on their own.
+        if ( $has_other_items ) {
+            $context['error'] = __( 'Subscription items must be purchased separately from one-time products.', 'breeze-payment-gateway' );
+            return $context;
+        }
+
+        // The API supports exactly one price per subscription — no multiple
+        // subscription products and no quantity multiplier.
+        if ( count( $sub_lines ) > 1 || $total_sub_qty > 1 ) {
+            $context['error'] = __( 'Only one subscription item (quantity 1) can be purchased per order. Please adjust your cart.', 'breeze-payment-gateway' );
+            return $context;
+        }
+
+        // Both IDs are required by the subscriptions API.
+        if ( empty( $sub_lines[0]['product_id'] ) ) {
+            $context['error'] = __( 'This subscription product is misconfigured (missing Breeze Product ID). Please contact the store.', 'breeze-payment-gateway' );
+            return $context;
+        }
+
+        $context['price_id']   = $sub_lines[0]['price_id'];
+        $context['product_id'] = $sub_lines[0]['product_id'];
+        return $context;
+    }
+
+    /**
+     * Resolve (creating if necessary) the Breeze customer ID for an order.
+     *
+     * POST /v1/subscriptions requires an existing Breeze customer id. Breeze's
+     * POST /v1/customers is an upsert keyed by `referenceId`, so we send a
+     * stable referenceId (the WC user id for logged-in shoppers, else a hash of
+     * the billing email for guests) and repeated checkouts resolve to the same
+     * Breeze customer.
+     *
+     * @param WC_Order $order Order to resolve the customer for.
+     * @return string|false Breeze customer id, or false on failure.
+     */
+    private function resolve_breeze_customer_id( $order ) {
+        $email   = $order->get_billing_email();
+        $user_id = $order->get_customer_id();
+
+        if ( $user_id ) {
+            $reference_id = 'wc-user-' . $user_id;
+        } elseif ( $email ) {
+            $reference_id = 'wc-guest-' . md5( strtolower( $email ) );
+        } else {
+            // Nothing stable to key a customer on.
+            return false;
+        }
+
+        $customer_data = array(
+            'referenceId' => $reference_id,
+            'signupAt'    => (int) ( time() * 1000 ), // Breeze timestamps are unix ms.
+        );
+
+        if ( $email ) {
+            $customer_data['email'] = $email;
+        }
+        $first_name = $order->get_billing_first_name();
+        if ( $first_name ) {
+            $customer_data['firstName'] = $first_name;
+        }
+        $last_name = $order->get_billing_last_name();
+        if ( $last_name ) {
+            $customer_data['lastName'] = $last_name;
+        }
+
+        $result = $this->breeze_api_request( 'POST', '/v1/customers', $customer_data );
+
+        if ( ! $result || empty( $result['id'] ) ) {
+            return false;
+        }
+
+        return $result['id'];
+    }
+
+    /**
+     * Handle SUBSCRIPTION_STATUS_UPDATED webhook event.
+     *
+     * Routes on `data.status` to update the associated WooCommerce order.
+     *
+     * @param array $data Webhook data payload.
+     */
+    private function handle_subscription_status_updated_webhook( $data ) {
+
+        $order = $this->get_order_from_subscription_webhook( $data );
+        if ( ! $order ) {
+            return;
+        }
+
+        $status        = isset( $data['status'] ) ? $data['status'] : '';
+        $sub_id        = isset( $data['id'] ) ? $data['id'] : '';
+
+        switch ( $status ) {
+
+            case 'ACTIVE':
+                $order->add_order_note(
+                    sprintf(
+                        __( 'Breeze subscription active (ID: %s)', 'breeze-payment-gateway' ),
+                        $sub_id ? $sub_id : 'N/A'
+                    )
+                );
+                if ( $sub_id ) {
+                    $order->update_meta_data( '_breeze_subscription_id', $sub_id );
+                    $order->save();
+                }
+                break;
+
+            case 'TRIALING':
+            case 'DISCOUNTED_TRIALING':
+                $order->add_order_note( __( 'Subscription trial period started', 'breeze-payment-gateway' ) );
+                break;
+
+            case 'GRACE_PERIOD':
+                $order->add_order_note( __( 'Breeze subscription entered grace period', 'breeze-payment-gateway' ) );
+                $order->update_status( 'on-hold', __( 'Breeze subscription in grace period.', 'breeze-payment-gateway' ) );
+                break;
+
+            case 'SUSPENDED':
+                $order->add_order_note( __( 'Breeze subscription suspended', 'breeze-payment-gateway' ) );
+                $order->update_status( 'on-hold', __( 'Breeze subscription suspended.', 'breeze-payment-gateway' ) );
+                break;
+
+            case 'CANCELED':
+            case 'INCOMPLETE_EXPIRED':
+                $order->add_order_note(
+                    sprintf(
+                        __( 'Breeze subscription %s', 'breeze-payment-gateway' ),
+                        strtolower( $status )
+                    )
+                );
+                $order->update_status( 'cancelled', __( 'Breeze subscription cancelled.', 'breeze-payment-gateway' ) );
+                break;
+
+            case 'INCOMPLETE':
+            case 'SCHEDULED':
+                $order->add_order_note(
+                    sprintf(
+                        __( 'Breeze subscription status: %s', 'breeze-payment-gateway' ),
+                        $status
+                    )
+                );
+                break;
+
+            default:
+                if ( $this->debug ) {
+                    $this->log->warning(
+                        sprintf( 'Unknown subscription status: %s', $status ),
+                        array( 'source' => $this->id )
+                    );
+                }
+        }
+    }
+
+    /**
+     * Handle INVOICE_STATUS_UPDATED webhook event.
+     *
+     * On PAID: creates a new WooCommerce renewal order linked to the original
+     * subscription order. On other statuses: adds informational order notes.
+     *
+     * @param array $data Webhook data payload.
+     */
+    private function handle_invoice_status_updated_webhook( $data ) {
+
+        $status          = isset( $data['status'] ) ? $data['status'] : '';
+        $subscription_id = isset( $data['subscriptionId'] ) ? $data['subscriptionId'] : '';
+        $invoice_id      = isset( $data['id'] ) ? $data['id'] : 'N/A';
+
+        switch ( $status ) {
+
+            case 'PAID':
+                if ( ! $subscription_id ) {
+                    return;
+                }
+
+                // Idempotency: invoice webhooks are delivered at-least-once. If
+                // this invoice has already been recorded on an order (the
+                // original for the first invoice, or a renewal for later ones),
+                // a redelivery must not create a duplicate paid order.
+                if ( 'N/A' !== $invoice_id && $this->order_exists_with_invoice_id( $invoice_id ) ) {
+                    return;
+                }
+
+                $original_order = $this->get_order_by_subscription_id( $subscription_id );
+                if ( ! $original_order ) {
+                    return;
+                }
+
+                // Breeze marks the first invoice of a subscription with no
+                // `previousInvoiceId`; renewals reference the prior invoice.
+                // This authoritative signal (rather than the order's paid state)
+                // decides whether to complete the customer's own order or spin
+                // up a renewal.
+                $is_renewal = ! empty( $data['previousInvoiceId'] );
+
+                if ( ! $is_renewal ) {
+                    // First invoice → complete the customer's OWN order instead
+                    // of creating a separate renewal. Without this the original
+                    // order is stranded on-hold (no paid email / fulfillment).
+                    if ( ! $original_order->is_paid() ) {
+                        $original_order->payment_complete( 'N/A' !== $invoice_id ? $invoice_id : '' );
+                    }
+                    if ( 'N/A' !== $invoice_id ) {
+                        $original_order->update_meta_data( '_breeze_invoice_id', $invoice_id );
+                    }
+                    $original_order->add_order_note(
+                        sprintf(
+                            __( 'Breeze subscription first payment received — Invoice %s.', 'breeze-payment-gateway' ),
+                            $invoice_id
+                        )
+                    );
+                    $original_order->save();
+                    return;
+                }
+
+                // Subsequent invoice → create a renewal order mirroring the
+                // original, priced from the invoice and captured as paid.
+                $this->create_renewal_order( $original_order, $subscription_id, $invoice_id, $data );
+                break;
+
+            case 'EXPIRED':
+            case 'CANCELED':
+                if ( $subscription_id ) {
+                    $order = $this->get_order_by_subscription_id( $subscription_id );
+                    if ( $order ) {
+                        $order->add_order_note(
+                            sprintf(
+                                __( 'Breeze subscription invoice %s: %s', 'breeze-payment-gateway' ),
+                                $invoice_id,
+                                $status
+                            )
+                        );
+                    }
+                }
+                break;
+
+            case 'PENDING':
+            case 'GRACE_PERIOD':
+                if ( $subscription_id ) {
+                    $order = $this->get_order_by_subscription_id( $subscription_id );
+                    if ( $order ) {
+                        $order->add_order_note(
+                            sprintf(
+                                __( 'Breeze subscription invoice %s status: %s', 'breeze-payment-gateway' ),
+                                $invoice_id,
+                                $status
+                            )
+                        );
+                    }
+                }
+                break;
+        }
+    }
+
+    /**
+     * Find the ORIGINAL WooCommerce order for a Breeze subscription.
+     *
+     * Every renewal order also stores `_breeze_subscription_id`, so a naive
+     * newest-first query would return a renewal once one exists. Ordering by
+     * date ASC returns the oldest match — the order created at checkout.
+     *
+     * @param string $subscription_id Breeze subscription ID.
+     * @return WC_Order|false Order object or false if not found.
+     */
+    private function get_order_by_subscription_id( $subscription_id ) {
+        $orders = wc_get_orders( array(
+            'meta_key'   => '_breeze_subscription_id',
+            'meta_value' => $subscription_id,
+            'orderby'    => 'date',
+            'order'      => 'ASC',
+            'limit'      => 1,
+        ) );
+        return ! empty( $orders ) ? $orders[0] : false;
+    }
+
+    /**
+     * Whether any order already records the given Breeze invoice ID.
+     *
+     * Used to make INVOICE_STATUS_UPDATED:PAID idempotent against at-least-once
+     * webhook redelivery — both the original order (first invoice) and renewal
+     * orders store `_breeze_invoice_id`.
+     *
+     * @param string $invoice_id Breeze invoice ID.
+     * @return bool True if an order with this invoice ID exists.
+     */
+    private function order_exists_with_invoice_id( $invoice_id ) {
+        $orders = wc_get_orders( array(
+            'meta_key'   => '_breeze_invoice_id',
+            'meta_value' => $invoice_id,
+            'limit'      => 1,
+            'return'     => 'ids',
+        ) );
+        return ! empty( $orders );
+    }
+
+    /**
+     * Create a paid renewal order mirroring the original subscription order.
+     *
+     * The renewal total is sourced from the invoice's `amount` (minor units)
+     * so coupons/proration applied on the Breeze side are honored rather than
+     * recomputed from the current catalog price. Payment is captured via
+     * payment_complete() so the renewal gets a transaction ID + paid date and
+     * triggers the normal paid-order flow (emails, fulfillment).
+     *
+     * @param WC_Order $original_order  The original subscription order.
+     * @param string   $subscription_id Breeze subscription ID.
+     * @param string   $invoice_id      Breeze invoice ID ('N/A' if absent).
+     * @param array    $data            Invoice webhook data payload.
+     */
+    private function create_renewal_order( $original_order, $subscription_id, $invoice_id, $data ) {
+        $renewal_order = wc_create_order( array(
+            'customer_id'          => $original_order->get_customer_id(),
+            'payment_method'       => $original_order->get_payment_method(),
+            'payment_method_title' => $original_order->get_payment_method_title(),
+        ) );
+
+        if ( is_wp_error( $renewal_order ) || ! $renewal_order ) {
+            if ( $this->debug ) {
+                $this->log->error(
+                    sprintf( 'Failed to create renewal order for subscription %s (invoice %s)', $subscription_id, $invoice_id ),
+                    array( 'source' => $this->id )
+                );
+            }
+            return;
+        }
+
+        foreach ( $original_order->get_items() as $item ) {
+            $product = $item->get_product();
+            if ( $product ) {
+                $renewal_order->add_product( $product, $item->get_quantity() );
+            }
+        }
+
+        $renewal_order->set_address( $original_order->get_address( 'billing' ), 'billing' );
+        $renewal_order->set_address( $original_order->get_address( 'shipping' ), 'shipping' );
+        $renewal_order->set_currency( $original_order->get_currency() );
+        $renewal_order->calculate_totals();
+
+        // Prefer the amount Breeze actually charged over the recomputed catalog
+        // total. Amount is in minor units; the gateway is USD-only (2 decimals).
+        if ( isset( $data['amount'] ) && is_numeric( $data['amount'] ) ) {
+            $renewal_order->set_total( round( ( (int) $data['amount'] ) / 100, 2 ) );
+        }
+
+        $renewal_order->update_meta_data( '_breeze_subscription_id', $subscription_id );
+        $renewal_order->update_meta_data( '_breeze_is_renewal', 'yes' );
+        if ( 'N/A' !== $invoice_id ) {
+            $renewal_order->update_meta_data( '_breeze_invoice_id', $invoice_id );
+        }
+        $renewal_order->add_order_note(
+            sprintf(
+                __( 'Breeze subscription renewal — Invoice %s.', 'breeze-payment-gateway' ),
+                $invoice_id
+            )
+        );
+
+        $renewal_order->payment_complete( 'N/A' !== $invoice_id ? $invoice_id : '' );
+        $renewal_order->save();
+    }
+
+    /**
+     * Resolve a WooCommerce order from a subscription webhook payload.
+     *
+     * Tries `clientReferenceId` first (same format as payment webhooks), then
+     * falls back to a meta query on `_breeze_subscription_id`.
+     *
+     * @param array $data Webhook data payload.
+     * @return WC_Order|false Order object or false if not resolved.
+     */
+    private function get_order_from_subscription_webhook( $data ) {
+
+        $subscription_id = isset( $data['id'] ) ? $data['id'] : '';
+
+        // Prefer clientReferenceId (format: "order-{id}").
+        if ( isset( $data['clientReferenceId'] ) ) {
+            $raw_id   = str_replace( 'order-', '', $data['clientReferenceId'] );
+            $order_id = absint( $raw_id );
+            if ( $order_id ) {
+                $order = wc_get_order( $order_id );
+                // Only accept the resolved order if it actually owns this
+                // subscription — parity with the payment webhook's pageId
+                // cross-check. Guards against a signed payload whose
+                // clientReferenceId resolves to an unrelated / reused order.
+                if ( $order && ( ! $subscription_id || $order->get_meta( '_breeze_subscription_id' ) === $subscription_id ) ) {
+                    return $order;
+                }
+            }
+        }
+
+        // Fall back to _breeze_subscription_id meta query.
+        if ( $subscription_id ) {
+            return $this->get_order_by_subscription_id( $subscription_id );
+        }
+
+        return false;
     }
 }
