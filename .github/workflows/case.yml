@@ -107,7 +107,7 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ steps.app-token.outputs.token }}
           trigger_phrase: "/case"
-          allowed_bots: "breeze-case-bridge"
+          allowed_bots: "breeze-case-bridge,breeze-case-bridge-core"
           label_trigger: "case"
           branch_prefix: "case/"
           claude_args: |
