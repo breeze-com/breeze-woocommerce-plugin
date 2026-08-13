@@ -21,7 +21,7 @@ name: CASE Merge
 
 on:
   pull_request:
-    types: [opened, reopened, labeled]
+    types: [opened, reopened, synchronize, labeled]
 
 permissions:
   contents: read
@@ -35,7 +35,7 @@ concurrency:
 env:
   # Rollout step 5 flips this: autonomous (no-requester) C1 PRs auto-merge.
   # Until then they are classified + labeled but left for humans.
-  AUTONOMOUS_C1_MERGE: "false"
+  AUTONOMOUS_C1_MERGE: "true"
 
 jobs:
   classify:
@@ -159,6 +159,10 @@ jobs:
           set -euo pipefail
           for L in "case-c1:0e8a16" "case-c2:fbca04" "case-c3:d93f0b" "case-confirmed:1d76db"; do
             gh api "repos/${GITHUB_REPOSITORY}/labels" -f name="${L%%:*}" -f color="${L##*:}" >/dev/null 2>&1 || true
+          done
+          for OLD in case-c1 case-c2 case-c3; do
+            [ "$OLD" = "case-${TIER}" ] && continue
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/labels/${OLD}" >/dev/null 2>&1 || true
           done
           gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/labels" \
             --input <(jq -n --arg t "case-${TIER}" '{labels:[$t]}') >/dev/null
