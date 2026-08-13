@@ -1,0 +1,404 @@
+# CASE Merge — change-tiered merge authority for CASE PRs.
+# Spec: case-change-tier-merge-spec-2026-08-13 (Marty-ratified Aug 13 2026).
+#
+# Tier the CHANGE, not the repo:
+#   C1 obvious       — docs/tests/lint-only, reverts, verified supplied patches
+#                      -> merges automatically once this repo's tests + checks pass.
+#   C2 routine       — agent-authored features/fixes
+#                      -> merges when the ORIGINAL requester confirms in the Slack
+#                         thread (the bridge records that as the `case-confirmed`
+#                         label; identity is enforced bridge-side on the envelope).
+#   C3 consequential — auth/secrets/payment logic/agent voice/CI/deps/migrations
+#                      -> never merged here; a human with write access reviews.
+#
+# Classification is layered fail-closed: deterministic C3 path triggers run
+# FIRST (no model involved); the model only separates C1 from C2 and is told
+# doubt escalates. Every classification is commented on the PR (audit trail).
+# This workflow only ever acts on PRs authored by the CASE coding App, and the
+# agent cannot edit this file (workflow writes are denied in its settings and
+# the App holds no workflows permission).
+name: CASE Merge
+
+on:
+  pull_request:
+    types: [opened, reopened, labeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: case-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+env:
+  # Rollout step 5 flips this: autonomous (no-requester) C1 PRs auto-merge.
+  # Until then they are classified + labeled but left for humans.
+  AUTONOMOUS_C1_MERGE: "false"
+
+jobs:
+  classify:
+    if: >-
+      github.event.action != 'labeled' &&
+      (github.event.pull_request.user.login == 'breeze-case[bot]' ||
+       github.event.pull_request.user.login == 'breeze-case-core[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint repo token
+        id: repo-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Mint hub token (notify relay only)
+        id: hub-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: case
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Compute diff
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "origin/${BASE_REF}...HEAD" > /tmp/files.txt
+          git diff "origin/${BASE_REF}...HEAD" > /tmp/diff.patch
+          echo "changed files:"; cat /tmp/files.txt
+
+      - name: Deterministic C3 screen (paths decide, no model)
+        id: screen
+        run: |
+          set -euo pipefail
+          # Path families that make a change consequential wherever it lands:
+          # CI/workflows, env/secrets/keys, dependency manifests + lockfiles,
+          # auth surfaces, external-agent voice (prompts/knowledge), schema/
+          # migrations, deploy config. Over-matching is fine — it escalates to
+          # a human, never the other way.
+          C3RE='^\.github/|(^|/)\.env|(^|/)package(-lock)?\.json$|(^|/)yarn\.lock$|(^|/)pnpm-lock\.yaml$|(^|/)requirements[^/]*\.txt$|(^|/)Pipfile|(^|/)poetry\.lock$|(^|/)go\.(mod|sum)$|(^|/)Cargo\.(toml|lock)$|(^|/)Gemfile|(^|/)composer\.(json|lock)$|(^|/)middleware\.[jt]sx?$|secret|credential|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)prompts?/|system_prompt|knowledge|(^|/)migrations?/|\.sql$|(^|/)vercel\.json$|(^|/)Dockerfile|(^|/)railway\.(json|toml)$|(^|/)Procfile$|(^|/)app\.ya?ml$|(^|/)serverless\.ya?ml$'
+          HITS=$( (grep -iE "$C3RE" /tmp/files.txt || true) | head -20 )
+          AUTH_HITS=$( (grep -iE 'auth' /tmp/files.txt || true) | (grep -ivE 'author' || true) | head -20 )
+          {
+            echo "c3_hits<<EOF"
+            printf '%s\n%s\n' "$HITS" "$AUTH_HITS" | sed '/^$/d' | sort -u
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Classify C1 vs C2 (model; doubt escalates)
+        id: tier
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          C3_HITS: ${{ steps.screen.outputs.c3_hits }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ -n "${C3_HITS:-}" ]; then
+            echo "tier=c3" >> "$GITHUB_OUTPUT"
+            {
+              echo "rationale<<EOF"
+              echo "deterministic path trigger: $(echo "$C3_HITS" | tr '\n' ' ' | head -c 300)"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Pull the originating issue body (supplied-patch detection needs it).
+          ISSUE_NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+          ISSUE_BODY=""
+          if [ -n "$ISSUE_NUM" ]; then
+            ISSUE_BODY=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUM}" --jq '.body // ""' || true)
+          fi
+          echo "issue_num=${ISSUE_NUM}" >> "$GITHUB_OUTPUT"
+          SYS='You are the merge-tier classifier for CASE, a governed coding agent. Output ONLY a JSON object: {"tier":"c1"|"c2"|"c3","rationale":"one sentence"}.
+          c1 = obvious/mechanical: documentation, comments or copy only; test-only changes (no production code); lint/format-only; a revert of a previous commit; a trivial config VALUE change; OR the diff faithfully applies a patch a human supplied verbatim in the originating issue and attested they verified (compare the diff against any patch/diff block in the issue body — near-identical hunks count).
+          c2 = routine substantive work the agent authored: new logic, features, refactors, bug fixes.
+          c3 = consequential regardless of where it lives: anything touching authentication, authorization, session or token handling, secrets, cryptography, payment or money paths, what an externally-facing agent says (prompts, knowledge bases), CI or release config, database schema or data deletion — or anything you are not confident about.
+          When in doubt between two tiers, always choose the HIGHER one (c1<c2<c3).'
+          DIFF=$(head -c 50000 /tmp/diff.patch)
+          PAYLOAD=$(jq -n --arg sys "$SYS" --arg title "${PR_TITLE:-}" --arg body "${PR_BODY:-}" \
+            --arg issue "$ISSUE_BODY" --arg diff "$DIFF" \
+            '{model:"claude-sonnet-4-6", max_tokens:400, system:$sys,
+              messages:[{role:"user",
+                content:("PR TITLE:\n"+$title+"\n\nPR BODY:\n"+$body+"\n\nORIGINATING ISSUE BODY:\n"+$issue+"\n\nDIFF:\n"+$diff)}]}')
+          RESP=$(curl -fsS https://api.anthropic.com/v1/messages \
+            -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            --data "$PAYLOAD" || true)
+          VERDICT=$(printf '%s' "$RESP" | jq -r '.content[0].text // ""' | grep -oE '\{.*\}' | head -1 || true)
+          TIER=$(printf '%s' "$VERDICT" | jq -r '.tier // empty' 2>/dev/null || true)
+          RAT=$(printf '%s' "$VERDICT" | jq -r '.rationale // empty' 2>/dev/null || true)
+          case "$TIER" in
+            c1|c2|c3) : ;;
+            *) TIER="c2"; RAT="classifier unavailable or unparseable; defaulting to requester confirmation (fail toward the human gate)";;
+          esac
+          echo "tier=$TIER" >> "$GITHUB_OUTPUT"
+          RAT_ONELINE=$(printf '%s' "$RAT" | tr '\n' ' ' | head -c 400)
+          echo "rationale=$RAT_ONELINE" >> "$GITHUB_OUTPUT"
+
+      - name: Label + audit comment
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          TIER: ${{ steps.tier.outputs.tier }}
+          RAT: ${{ steps.tier.outputs.rationale }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          for L in "case-c1:0e8a16" "case-c2:fbca04" "case-c3:d93f0b" "case-confirmed:1d76db"; do
+            gh api "repos/${GITHUB_REPOSITORY}/labels" -f name="${L%%:*}" -f color="${L##*:}" >/dev/null 2>&1 || true
+          done
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/labels" \
+            --input <(jq -n --arg t "case-${TIER}" '{labels:[$t]}') >/dev/null
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+            --input <(jq -n --arg t "$TIER" --arg r "$RAT" \
+              '{body:("**CASE merge tier: " + ($t|ascii_upcase) + "** — " + $r + "\n\nPolicy: C1 merges automatically once checks pass; C2 merges on the requester'"'"'s in-thread confirmation; C3 waits for a human reviewer with write access. Say `escalate` in the Slack thread to bump the tier.")}') >/dev/null
+
+      - name: Parse Slack routing from the originating issue
+        id: routing
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          ISSUE_NUM: ${{ steps.tier.outputs.issue_num }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          NUM="${ISSUE_NUM:-}"
+          if [ -z "$NUM" ]; then
+            NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+          fi
+          CH=""; TH=""; RQ=""
+          if [ -n "$NUM" ]; then
+            BODY=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" --jq '.body // ""' || true)
+            ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+            if [ -n "$ROUTE" ]; then
+              CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
+              TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
+              RQ=$(printf '%s' "$ROUTE" | jq -r '.requester // empty' 2>/dev/null || true)
+            fi
+          fi
+          echo "channel=$CH" >> "$GITHUB_OUTPUT"
+          echo "thread=$TH" >> "$GITHUB_OUTPUT"
+          echo "requester=$RQ" >> "$GITHUB_OUTPUT"
+
+      - name: Notify thread (PR opened + tier)
+        if: steps.routing.outputs.channel != ''
+        env:
+          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          TIER: ${{ steps.tier.outputs.tier }}
+          RAT: ${{ steps.tier.outputs.rationale }}
+          CH: ${{ steps.routing.outputs.channel }}
+          TH: ${{ steps.routing.outputs.thread }}
+          RQ: ${{ steps.routing.outputs.requester }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          case "$TIER" in
+            c1) TEXT="PR is up: ${PR_URL} (tier C1 — ${RAT}). Auto-merging once tests and checks pass; I'll confirm here." ;;
+            c2) TEXT="PR is up: ${PR_URL} (tier C2 — ${RAT}). <@${RQ}> check it does what you asked and reply here to confirm (e.g. \"works, ship it\") and I'll merge it. \`[case-pr ${GITHUB_REPOSITORY}#${PR_NUM} requester:${RQ}]\`" ;;
+            *)  TEXT="PR is up: ${PR_URL} (tier C3 — ${RAT}). This class of change always gets a human review before merge, so it's waiting on someone with write access." ;;
+          esac
+          FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-opened.json"
+          B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
+          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
+            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+            || echo "::warning::notify relay failed"
+
+      - name: C1 — test gate (no tokens in env; PR code runs here)
+        if: >-
+          steps.tier.outputs.tier == 'c1' &&
+          (steps.routing.outputs.channel != '' || env.AUTONOMOUS_C1_MERGE == 'true')
+        run: |
+          set -euo pipefail
+          # This repo's own tests are part of the gate, not just hosted checks.
+          if [ -f package.json ] && jq -e '.scripts.test' package.json >/dev/null; then
+            (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) >/dev/null 2>&1
+            npm test
+          fi
+
+      - name: C1 — wait for checks, merge
+        if: >-
+          steps.tier.outputs.tier == 'c1' &&
+          (steps.routing.outputs.channel != '' || env.AUTONOMOUS_C1_MERGE == 'true')
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            STATE=$(gh pr view "$PR_NUM" --json mergeable,statusCheckRollup \
+              --jq '{m: .mergeable,
+                     bad: [.statusCheckRollup[]? | select(.workflowName != "CASE Merge")
+                           | select((.conclusion // .state) as $s
+                             | ["FAILURE","ERROR","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE"] | index($s))] | length,
+                     pending: [.statusCheckRollup[]? | select(.workflowName != "CASE Merge")
+                           | select(((.status // "") == "IN_PROGRESS") or ((.status // "") == "QUEUED")
+                                    or ((.state // "") == "PENDING") or ((.state // "") == "EXPECTED"))] | length}')
+            BAD=$(printf '%s' "$STATE" | jq -r '.bad')
+            PEND=$(printf '%s' "$STATE" | jq -r '.pending')
+            MERGEABLE=$(printf '%s' "$STATE" | jq -r '.m')
+            if [ "$MERGEABLE" = "CONFLICTING" ]; then echo "::error::PR has conflicts"; exit 1; fi
+            if [ "$BAD" != "0" ]; then echo "::error::a required check failed"; exit 1; fi
+            if [ "$PEND" = "0" ]; then break; fi
+            sleep 20
+          done
+          [ "${PEND:-1}" = "0" ] || { echo "::error::checks did not finish in time"; exit 1; }
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash --jq .merged
+
+      - name: Notify thread (merged)
+        if: >-
+          success() && steps.tier.outputs.tier == 'c1' &&
+          steps.routing.outputs.channel != ''
+        env:
+          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          CH: ${{ steps.routing.outputs.channel }}
+          TH: ${{ steps.routing.outputs.thread }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          TEXT="Merged: ${PR_URL} — tests and checks passed. If this repo auto-deploys, the change is rolling out now."
+          FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
+          B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
+          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
+            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+            || echo "::warning::notify relay failed"
+
+      - name: Report failure on the PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+            -f body="CASE Merge run failed: ${RUN_URL} — classification or auto-merge did not complete; the PR is untouched and a human can take it from here." >/dev/null || true
+
+  confirmed-merge:
+    if: >-
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'case-confirmed' &&
+      (github.event.sender.login == 'breeze-case-bridge[bot]' ||
+       github.event.sender.login == 'breeze-case-bridge-core[bot]' ||
+       github.event.sender.login == 'martyadmin-breeze')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Mint repo token
+        id: repo-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Mint hub token (notify relay only)
+        id: hub-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: case
+
+      - name: Verify tier labels (C3 never merges here)
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$LABELS" | jq -e 'index("case-c3")' >/dev/null; then
+            echo "::error::PR is tier C3 — human review required; a confirmation label cannot merge it."
+            exit 1
+          fi
+          if ! printf '%s' "$LABELS" | jq -e '(index("case-c1")) or (index("case-c2"))' >/dev/null; then
+            echo "::error::PR carries no CASE tier label — refusing to merge on confirmation alone."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Test gate (no tokens in env; PR code runs here)
+        run: |
+          set -euo pipefail
+          if [ -f package.json ] && jq -e '.scripts.test' package.json >/dev/null; then
+            (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) >/dev/null 2>&1
+            npm test
+          fi
+
+      - name: Wait for checks, merge
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            STATE=$(gh pr view "$PR_NUM" --json mergeable,statusCheckRollup \
+              --jq '{m: .mergeable,
+                     bad: [.statusCheckRollup[]? | select(.workflowName != "CASE Merge")
+                           | select((.conclusion // .state) as $s
+                             | ["FAILURE","ERROR","TIMED_OUT","CANCELLED","ACTION_REQUIRED","STARTUP_FAILURE"] | index($s))] | length,
+                     pending: [.statusCheckRollup[]? | select(.workflowName != "CASE Merge")
+                           | select(((.status // "") == "IN_PROGRESS") or ((.status // "") == "QUEUED")
+                                    or ((.state // "") == "PENDING") or ((.state // "") == "EXPECTED"))] | length}')
+            BAD=$(printf '%s' "$STATE" | jq -r '.bad')
+            PEND=$(printf '%s' "$STATE" | jq -r '.pending')
+            MERGEABLE=$(printf '%s' "$STATE" | jq -r '.m')
+            if [ "$MERGEABLE" = "CONFLICTING" ]; then echo "::error::PR has conflicts"; exit 1; fi
+            if [ "$BAD" != "0" ]; then echo "::error::a required check failed"; exit 1; fi
+            if [ "$PEND" = "0" ]; then break; fi
+            sleep 20
+          done
+          [ "${PEND:-1}" = "0" ] || { echo "::error::checks did not finish in time"; exit 1; }
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash --jq .merged
+
+      - name: Notify thread (merged)
+        env:
+          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          REPO_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+          CH=""; TH=""
+          if [ -n "$NUM" ]; then
+            BODY=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" --jq '.body // ""' || true)
+            ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+            if [ -n "$ROUTE" ]; then
+              CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
+              TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
+            fi
+          fi
+          [ -n "$CH" ] || exit 0
+          TEXT="Merged on your confirmation: ${PR_URL} — tests and checks re-verified. If this repo auto-deploys, the change is rolling out now."
+          FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
+          B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
+          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
+            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+            || echo "::warning::notify relay failed"
+
+      - name: Report failure on the PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+        run: |
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+            -f body="CASE Merge (confirmed) run failed: ${RUN_URL} — the merge did not complete; the PR is untouched and a human can take it from here." >/dev/null || true
