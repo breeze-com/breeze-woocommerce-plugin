@@ -197,7 +197,7 @@ jobs:
           echo "requester=$RQ" >> "$GITHUB_OUTPUT"
 
       - name: Notify thread (PR opened + tier)
-        if: steps.routing.outputs.channel != ''
+        if: steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
           GH_TOKEN: ${{ steps.hub-token.outputs.token }}
           TIER: ${{ steps.tier.outputs.tier }}
@@ -264,7 +264,7 @@ jobs:
       - name: Notify thread (merged)
         if: >-
           success() && steps.tier.outputs.tier == 'c1' &&
-          steps.routing.outputs.channel != ''
+          steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
           GH_TOKEN: ${{ steps.hub-token.outputs.token }}
           CH: ${{ steps.routing.outputs.channel }}
@@ -389,7 +389,7 @@ jobs:
               TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
             fi
           fi
-          [ -n "$CH" ] || exit 0
+          { [ -n "$CH" ] && [ -n "$TH" ]; } || exit 0
           TEXT="Merged on your confirmation: ${PR_URL} — tests and checks re-verified. If this repo auto-deploys, the change is rolling out now."
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
