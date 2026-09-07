@@ -103,9 +103,30 @@ jobs:
           C3_HITS: ${{ steps.screen.outputs.c3_hits }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_REF: ${{ github.head_ref }}
           GH_TOKEN: ${{ steps.repo-token.outputs.token }}
         run: |
           set -euo pipefail
+          # SCAFFOLD EXEMPTION (5 Sep 2026, Marty): the FIRST PR into a repo CASE
+          # just created is the whole app, so it always trips the path screen
+          # (package.json, auth files, vercel.json) and would wait on an
+          # engineer forever — the exact dependency this lane exists to remove.
+          # An empty repo has nothing to break; the requester confirming "it does
+          # what I asked" is the right gate, and going LIVE is gated separately
+          # (deploy lane access class). Conditions, all three: the create lane's
+          # marker is in the PR body, the head branch is case/scaffold, and the
+          # diff touches no .github/ file (the rails stay a human's).
+          if printf '%s' "${PR_BODY:-}" | grep -q '<!-- case-scaffold -->' \
+             && [ "${HEAD_REF:-}" = "case/scaffold" ] \
+             && ! grep -qE '^\.github/' /tmp/files.txt; then
+            echo "tier=c2" >> "$GITHUB_OUTPUT"
+            {
+              echo "rationale<<EOF"
+              echo "initial scaffold of a CASE-created repo: nothing exists yet to break, so the requester confirming it does what they asked is the gate; going live is gated separately by the deploy lane"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "${C3_HITS:-}" ]; then
             echo "tier=c3" >> "$GITHUB_OUTPUT"
             {
@@ -183,14 +204,20 @@ jobs:
             NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
           fi
           CH=""; TH=""; RQ=""
+          ROUTE=""
           if [ -n "$NUM" ]; then
             BODY=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" --jq '.body // ""' || true)
             ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
-            if [ -n "$ROUTE" ]; then
-              CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
-              TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
-              RQ=$(printf '%s' "$ROUTE" | jq -r '.requester // empty' 2>/dev/null || true)
-            fi
+          fi
+          # Fallback (5 Sep 2026): a create-lane scaffold PR has no originating
+          # issue; the create workflow writes the same marker into the PR body.
+          if [ -z "$ROUTE" ]; then
+            ROUTE=$(printf '%s' "${PR_BODY:-}" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+          fi
+          if [ -n "$ROUTE" ]; then
+            CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
+            TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
+            RQ=$(printf '%s' "$ROUTE" | jq -r '.requester // empty' 2>/dev/null || true)
           fi
           echo "channel=$CH" >> "$GITHUB_OUTPUT"
           echo "thread=$TH" >> "$GITHUB_OUTPUT"
@@ -207,13 +234,33 @@ jobs:
           RQ: ${{ steps.routing.outputs.requester }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          # Slack register (7 Sep 2026): ONE message per PR round, in plain
+          # words. For C2/C3 the preview lane posts that message (link + how
+          # to confirm); this step only queues the preview and speaks only if
+          # the queue write itself fails. Titles, not classifier rationale;
+          # the rationale lives in the PR comment for engineers.
+          T="${PR_TITLE#\[CASE\] }"
+          queue_preview() {
+            PF="preview/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}.json"
+            PB64=$(jq -n --arg r "$GITHUB_REPOSITORY" --arg p "$PR_NUM" --arg c "$CH" --arg t "$TH" --arg q "$RQ" --arg x "$TIER" --arg s "$T" '{repo:$r,pr:$p,channel:$c,thread:$t,requester:$q,tier:$x,title:$s}' | base64 -w0)
+            gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${PF}" -f message="preview: ${PF}" -f content="$PB64" >/dev/null
+          }
+          TEXT=""
           case "$TIER" in
-            c1) TEXT="PR is up: ${PR_URL} (tier C1 — ${RAT}). Auto-merging once tests and checks pass; I'll confirm here." ;;
-            c2) TEXT="PR is up: ${PR_URL} (tier C2 — ${RAT}). <@${RQ}> check it does what you asked and reply here to confirm (e.g. \"works, ship it\") and I'll merge it. \`[case-pr ${GITHUB_REPOSITORY}#${PR_NUM} requester:${RQ}]\`" ;;
-            *)  TEXT="PR is up: ${PR_URL} (tier C3 — ${RAT}). This class of change always gets a human review before merge, so it's waiting on someone with write access." ;;
+            c1) TEXT="Opened <${PR_URL}|PR #${PR_NUM}> — ${T}. It's a small, safe change, so it merges by itself once checks pass; I'll say here when it's in." ;;
+            c2) if ! queue_preview; then
+                  echo "::warning::preview queue write failed"
+                  TEXT="<@${RQ}> <${PR_URL}|PR #${PR_NUM}> is ready — ${T}. I couldn't build a preview this time. If it does what you asked, reply here (\"works, ship it\") or :+1: this message and I'll merge it. \`[case-pr ${GITHUB_REPOSITORY}#${PR_NUM} requester:${RQ}]\`"
+                fi ;;
+            *)  if ! queue_preview; then
+                  echo "::warning::preview queue write failed"
+                  TEXT="<${PR_URL}|PR #${PR_NUM}> is up — ${T}. This one needs an engineer with write access to merge; I'll post here when it lands."
+                fi ;;
           esac
+          [ -n "$TEXT" ] || { echo "preview queued; the preview lane posts the one message for this PR"; exit 0; }
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-opened.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
           gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
@@ -241,7 +288,7 @@ jobs:
           PR_NUM: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             STATE=$(gh pr view "$PR_NUM" --json mergeable,statusCheckRollup \
               --jq '{m: .mergeable,
                      bad: [.statusCheckRollup[]? | select(.workflowName != "CASE Merge")
@@ -271,9 +318,11 @@ jobs:
           TH: ${{ steps.routing.outputs.thread }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
-          TEXT="Merged: ${PR_URL} — tests and checks passed. If this repo auto-deploys, the change is rolling out now."
+          T="${PR_TITLE#\[CASE\] }"
+          TEXT="<${PR_URL}|PR #${PR_NUM}> is merged — ${T}. If this tool auto-deploys, the change is rolling out now."
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
           gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
@@ -350,7 +399,7 @@ jobs:
           PR_NUM: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             STATE=$(gh pr view "$PR_NUM" --json mergeable,statusCheckRollup \
               --jq '{m: .mergeable,
                      bad: [.statusCheckRollup[]? | select(.workflowName != "CASE Merge")
@@ -380,17 +429,21 @@ jobs:
         run: |
           set -euo pipefail
           NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
-          CH=""; TH=""
+          CH=""; TH=""; ROUTE=""
           if [ -n "$NUM" ]; then
             BODY=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" --jq '.body // ""' || true)
             ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
-            if [ -n "$ROUTE" ]; then
-              CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
-              TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
-            fi
+          fi
+          # Fallback: create-lane PRs carry the marker in the PR body (6 Sep 2026).
+          if [ -z "$ROUTE" ]; then
+            ROUTE=$(printf '%s' "${PR_BODY:-}" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+          fi
+          if [ -n "$ROUTE" ]; then
+            CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
+            TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
           fi
           { [ -n "$CH" ] && [ -n "$TH" ]; } || exit 0
-          TEXT="Merged on your confirmation: ${PR_URL} — tests and checks re-verified. If this repo auto-deploys, the change is rolling out now."
+          TEXT="Done — <${PR_URL}|PR #${PR_NUM}> is merged. If this tool auto-deploys, your change is rolling out now."
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
           gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
@@ -406,3 +459,38 @@ jobs:
           RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
             -f body="CASE Merge (confirmed) run failed: ${RUN_URL} — the merge did not complete; the PR is untouched and a human can take it from here." >/dev/null || true
+
+      # The person who confirmed was told "Merging now". If the merge dies, they
+      # must hear it in the SAME thread, with what failed (6 Sep 2026: a
+      # test-gate failure went only to the PR and Marty waited ten minutes).
+      - name: Notify thread (merge failed)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          REPO_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+          ROUTE=""
+          if [ -n "$NUM" ]; then
+            BODY=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" --jq '.body // ""' 2>/dev/null || true)
+            ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+          fi
+          [ -n "$ROUTE" ] || ROUTE=$(printf '%s' "${PR_BODY:-}" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+          CH=$(printf '%s' "$ROUTE" | jq -r '.channel // empty' 2>/dev/null || true)
+          TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
+          RQ=$(printf '%s' "$ROUTE" | jq -r '.requester // empty' 2>/dev/null || true)
+          { [ -n "$CH" ] && [ -n "$TH" ]; } || exit 0
+          # Name the failed step: the test gate is the usual one.
+          STEP=$(GH_TOKEN="$REPO_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs" --jq '[.jobs[].steps[] | select(.conclusion=="failure") | .name] | first // "a step"' 2>/dev/null || echo "a step")
+          MENTION=""; [ -n "$RQ" ] && MENTION="<@${RQ}> "
+          TEXT="${MENTION}I couldn't merge <${PR_URL}|PR #${PR_NUM}>: the \"${STEP}\" step failed, so nothing changed. Ask me what went wrong and I'll read the log, or an engineer with write access can merge it on GitHub."
+          FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-failed.json"
+          B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
+          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
+            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+            || echo "::warning::notify relay failed"
