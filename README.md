@@ -1,7 +1,7 @@
 # Breeze Payment Gateway for WooCommerce
 [![WooCommerce](https://img.shields.io/badge/WooCommerce-6.0%2B-purple.svg)](https://woocommerce.com/)
 [![PHP](https://img.shields.io/badge/PHP-7.4%2B-blue.svg)](https://php.net/)
-[![Tests](https://img.shields.io/badge/tests-539%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-786%20passing-brightgreen.svg)](#testing)
 [![Version](https://img.shields.io/badge/version-2.2.0-green.svg)](https://github.com/breeze-com/breeze-woocommerce-plugin)
 
 ![Breeze Payment Gateway](.github/images/banner_v2.png)
@@ -23,7 +23,7 @@
 - ✅ Multisite compatible
 - ✅ PHP 8.2+ compatible (no dynamic property deprecations)
 - ✅ PII-safe debug logging
-- ✅ 539 unit-test assertions across 5 suites + E2E test suite
+- ✅ 786 unit-test assertions across 13 suites + E2E test suite
 
 ## Installation
 
@@ -170,7 +170,7 @@ Both **partial** and **full** refunds are supported. Amounts are converted to ce
 
 ## Testing
 
-### Unit Tests — 539 assertions across 5 suites
+### Unit Tests — 786 assertions across 13 suites
 
 Each suite loads the real `WC_Breeze_Payment_Gateway` class with lightweight stubs (no WordPress/WooCommerce runtime) and exits non-zero on failure. They run on every PR and push to `main` via `.github/workflows/tests.yml`.
 
@@ -181,6 +181,14 @@ Each suite loads the real `WC_Breeze_Payment_Gateway` class with lightweight stu
 | `test-line-items.php` | `build_line_items()` payload — per-unit split, rounding, skips, shipping, entry cap | 45 |
 | `test-crypto-tax.php` | Preferred-crypto param gating + merchant-calculated tax (`taxDetails`) | 13 |
 | `test-webhook-signature.php` | Webhook HMAC-SHA256 verification, recursive key sort, fail-closed cases | 12 |
+| `test-filter-gateway-icon.php` | `filter_gateway_icon_html()` — checkout icon sizing constraint | 11 |
+| `test-get-order-from-webhook.php` | `get_order_from_webhook()` — webhook-to-order resolution + pageId replay-protection | 16 |
+| `test-settings-validators.php` | Flexible-amount and percentage settings validators + private helper | 37 |
+| `test-payment-webhook-handlers.php` | `is_available()`, `handle_payment_failed/success_webhook()` — currency gate, idempotency | 24 |
+| `test-process-refund.php` | `process_refund()` — guards, API failure/success, response shapes, minor-units conversion | 30 |
+| `test-handle-return.php` | `handle_return()` — token verification, status transitions, cart clearing, redirects | 35 |
+| `test-expire-siblings.php` | `expire_sibling_payment_pages()` — early returns, sibling expiry, best-effort behaviour | 18 |
+| `test-subscriptions.php` | Subscription flow: detection, unsupported carts, checkout creation, webhook handlers | 76 |
 
 Run any suite directly, or all of them:
 
