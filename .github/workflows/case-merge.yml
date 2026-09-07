@@ -223,6 +223,35 @@ jobs:
           echo "thread=$TH" >> "$GITHUB_OUTPUT"
           echo "requester=$RQ" >> "$GITHUB_OUTPUT"
 
+      - name: Autonomous non-C1 PR — keep the finding, close the PR (7 Sep 2026)
+        # No routing = nobody asked for this in Slack: it is the nightly sweep's
+        # own proposal. Only a C1 (docs/tests) can merge without a person; a C2
+        # needs a requester who does not exist and a C3 an engineer who was never
+        # asked — so it would only pile up (32 did, oldest 82 days). The finding
+        # is kept as an issue (deduped by title); the PR is closed with the why.
+        # Issue-driven PRs (case/issue-N-…) and scaffolds always carry routing.
+        if: >-
+          steps.routing.outputs.channel == '' &&
+          steps.tier.outputs.tier != 'c1' &&
+          github.event.action != 'synchronize' &&
+          !startsWith(github.head_ref, 'case/issue-')
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          set -euo pipefail
+          T="${PR_TITLE#\[CASE\] }"
+          existing=$(gh issue list --state open --search "in:title \"${T}\"" --json number --jq 'length' 2>/dev/null || echo 0)
+          if [ "$existing" = "0" ]; then
+            BODY="Found by CASE's nightly sweep. The proposed change is in #${PR_NUM}, closed unmerged: nobody asked for it in Slack, so nobody's confirmation counts and it would only wait. To take it, reopen #${PR_NUM} and merge it, or ask CASE for it in #agent-case and it comes back with a requester."
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues" -f title="$T" -f body="$BODY" -f "labels[]=case-sweep-finding" >/dev/null \
+              || echo "::warning::could not file the finding as an issue"
+          fi
+          gh pr comment "$PR_NUM" --body "Closing at birth: this came from the nightly sweep and nobody in Slack asked for it, so nobody's confirmation counts and it would only wait. The finding is kept as an issue; the sweep merges only changes that pass on their own (documentation and tests). If this change matters, ask CASE for it in #agent-case." >/dev/null
+          gh pr close "$PR_NUM" >/dev/null
+          echo "closed autonomous non-C1 PR #${PR_NUM}; finding kept as an issue"
+
       - name: Notify thread (PR opened + tier)
         if: steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
