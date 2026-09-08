@@ -151,7 +151,7 @@ jobs:
           DIFF=$(head -c 50000 /tmp/diff.patch)
           PAYLOAD=$(jq -n --arg sys "$SYS" --arg title "${PR_TITLE:-}" --arg body "${PR_BODY:-}" \
             --arg issue "$ISSUE_BODY" --arg diff "$DIFF" \
-            '{model:"claude-sonnet-4-6", max_tokens:400, system:$sys,
+            '{model:"claude-sonnet-5", max_tokens:400, thinking:{type:"disabled"}, system:$sys,
               messages:[{role:"user",
                 content:("PR TITLE:\n"+$title+"\n\nPR BODY:\n"+$body+"\n\nORIGINATING ISSUE BODY:\n"+$issue+"\n\nDIFF:\n"+$diff)}]}')
           RESP=$(curl -fsS https://api.anthropic.com/v1/messages \
@@ -164,7 +164,7 @@ jobs:
           RAT=$(printf '%s' "$VERDICT" | jq -r '.rationale // empty' 2>/dev/null || true)
           case "$TIER" in
             c1|c2|c3) : ;;
-            *) TIER="c2"; RAT="classifier unavailable or unparseable; defaulting to requester confirmation (fail toward the human gate)";;
+            *) TIER="c3"; RAT="classifier unavailable or unparseable; defaulting to C3 (an engineer with write access reviews) — 8 Sep 2026: an unparseable grade must never let a requester self-ship a change the model could not read";;
           esac
           echo "tier=$TIER" >> "$GITHUB_OUTPUT"
           RAT_ONELINE=$(printf '%s' "$RAT" | tr '\n' ' ' | head -c 400)
