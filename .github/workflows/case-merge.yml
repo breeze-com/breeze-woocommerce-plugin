@@ -14,9 +14,12 @@
 # Classification is layered fail-closed: deterministic C3 path triggers run
 # FIRST (no model involved); the model only separates C1 from C2 and is told
 # doubt escalates. Every classification is commented on the PR (audit trail).
-# This workflow only ever acts on PRs authored by the CASE coding App, and the
-# agent cannot edit this file (workflow writes are denied in its settings and
-# the App holds no workflows permission).
+# This workflow only ever acts on PRs authored by the CASE coding App AND whose
+# commits were pushed by the App (a person pushing to a case/* branch drops the
+# PR out of every automatic lane, 14 Sep 2026). The agent cannot edit this file
+# (workflow writes are denied in its settings and the App holds no workflows
+# permission). Merges are pinned to the exact commit that was screened, tiered
+# and tested; a head that moved is refused by GitHub (409).
 name: CASE Merge
 
 on:
@@ -42,7 +45,10 @@ jobs:
     if: >-
       github.event.action != 'labeled' &&
       (github.event.pull_request.user.login == 'breeze-case[bot]' ||
-       github.event.pull_request.user.login == 'breeze-case-core[bot]')
+       github.event.pull_request.user.login == 'breeze-case-core[bot]') &&
+      (github.event.action != 'synchronize' ||
+       github.event.sender.login == 'breeze-case[bot]' ||
+       github.event.sender.login == 'breeze-case-core[bot]')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -68,6 +74,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Compute diff
         env:
@@ -76,7 +83,18 @@ jobs:
           set -euo pipefail
           git diff --name-only "origin/${BASE_REF}...HEAD" > /tmp/files.txt
           git diff "origin/${BASE_REF}...HEAD" > /tmp/diff.patch
+          wc -c < /tmp/diff.patch | tr -d ' ' > /tmp/diff.bytes
+          # Is the base branch still an empty CASE-created repo? Only rails and
+          # boilerplate may exist there: .github/, CLAUDE.md, README, license,
+          # .gitignore. Anything else means real code lives on main already
+          # and the scaffold exemption below must not apply (14 Sep 2026).
+          if [ -z "$(git ls-tree -r --name-only "origin/${BASE_REF}" | grep -vE '^(\.github/|CLAUDE\.md$|README(\.md)?$|\.gitignore$|LICENSE(\.md)?$)' || true)" ]; then
+            echo 1 > /tmp/base_empty
+          else
+            echo 0 > /tmp/base_empty
+          fi
           echo "changed files:"; cat /tmp/files.txt
+          echo "diff bytes: $(cat /tmp/diff.bytes); base empty: $(cat /tmp/base_empty)"
 
       - name: Deterministic C3 screen (paths decide, no model)
         id: screen
@@ -89,7 +107,11 @@ jobs:
           # a human, never the other way.
           C3RE='^\.github/|(^|/)\.env|(^|/)package(-lock)?\.json$|(^|/)yarn\.lock$|(^|/)pnpm-lock\.yaml$|(^|/)requirements[^/]*\.txt$|(^|/)Pipfile|(^|/)poetry\.lock$|(^|/)go\.(mod|sum)$|(^|/)Cargo\.(toml|lock)$|(^|/)Gemfile|(^|/)composer\.(json|lock)$|(^|/)middleware\.[jt]sx?$|secret|credential|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)prompts?/|system_prompt|knowledge|(^|/)migrations?/|\.sql$|(^|/)vercel\.json$|(^|/)Dockerfile|(^|/)railway\.(json|toml)$|(^|/)Procfile$|(^|/)app\.ya?ml$|(^|/)serverless\.ya?ml$'
           HITS=$( (grep -iE "$C3RE" /tmp/files.txt || true) | head -20 )
-          AUTH_HITS=$( (grep -iE 'auth' /tmp/files.txt || true) | (grep -ivE 'author' || true) | head -20 )
+          # Positive auth pattern. The old form dropped every path containing
+          # 'author', which silently excluded authorization/authorize files
+          # (14 Sep 2026, Claude Security). Only author-metadata files are
+          # excluded now; authoriz*/authz/authn/oauth/jwt/session are hits.
+          AUTH_HITS=$( (grep -iE '(^|/)auth[^/]*$|(^|/)auth/|authn|authz|authoriz|authentic|oauth|jwt|passport|(^|/)sessions?[./]' /tmp/files.txt || true) | (grep -ivE '(^|/)AUTHORS?(\.[a-z]+)?$|(^|/)authors?\.[a-z]+$' || true) | head -20 )
           {
             echo "c3_hits<<EOF"
             printf '%s\n%s\n' "$HITS" "$AUTH_HITS" | sed '/^$/d' | sort -u
@@ -116,8 +138,12 @@ jobs:
           # (deploy lane access class). Conditions, all three: the create lane's
           # marker is in the PR body, the head branch is case/scaffold, and the
           # diff touches no .github/ file (the rails stay a human's).
+          # Fourth condition (14 Sep 2026): the base branch must actually be an
+          # empty CASE-created repo. The marker and the branch name are chosen
+          # by whoever wrote the PR; the state of main is not.
           if printf '%s' "${PR_BODY:-}" | grep -q '<!-- case-scaffold -->' \
              && [ "${HEAD_REF:-}" = "case/scaffold" ] \
+             && [ "$(cat /tmp/base_empty)" = "1" ] \
              && ! grep -qE '^\.github/' /tmp/files.txt; then
             echo "tier=c2" >> "$GITHUB_OUTPUT"
             {
@@ -138,9 +164,25 @@ jobs:
           fi
           # Pull the originating issue body (supplied-patch detection needs it).
           ISSUE_NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
-          ISSUE_BODY=""
+          # The issue body can carry a "verified patch" attestation that makes a
+          # change C1. That only counts when the issue was filed by CASE's
+          # bridge (a Slack request from a workspace member) or by an org
+          # member. Anyone else's issue body is withheld from the classifier
+          # (14 Sep 2026, Claude Security).
+          ISSUE_BODY=""; ISSUE_TRUSTED=0
           if [ -n "$ISSUE_NUM" ]; then
-            ISSUE_BODY=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUM}" --jq '.body // ""' || true)
+            ISSUE_JSON=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${ISSUE_NUM}" 2>/dev/null || echo '{}')
+            ISSUE_AUTHOR=$(printf '%s' "$ISSUE_JSON" | jq -r '.user.login // ""')
+            ISSUE_ASSOC=$(printf '%s' "$ISSUE_JSON" | jq -r '.author_association // ""')
+            ISSUE_IS_PR=$(printf '%s' "$ISSUE_JSON" | jq -r 'has("pull_request")')
+            case "$ISSUE_AUTHOR" in 'breeze-case-bridge[bot]'|'breeze-case-bridge-core[bot]') ISSUE_TRUSTED=1 ;; esac
+            case "$ISSUE_ASSOC" in MEMBER|OWNER) ISSUE_TRUSTED=1 ;; esac
+            [ "$ISSUE_IS_PR" = "true" ] && ISSUE_TRUSTED=0
+            if [ "$ISSUE_TRUSTED" = "1" ]; then
+              ISSUE_BODY=$(printf '%s' "$ISSUE_JSON" | jq -r '.body // ""')
+            else
+              ISSUE_BODY="(withheld: the originating issue was not filed by an org member or by CASE's bridge, so nothing in it counts as a supplied patch or a verification)"
+            fi
           fi
           echo "issue_num=${ISSUE_NUM}" >> "$GITHUB_OUTPUT"
           SYS='You are the merge-tier classifier for CASE, a governed coding agent. Output ONLY a JSON object: {"tier":"c1"|"c2"|"c3","rationale":"one sentence"}.
@@ -148,12 +190,14 @@ jobs:
           c2 = routine substantive work the agent authored: new logic, features, refactors, bug fixes.
           c3 = consequential regardless of where it lives: anything touching authentication, authorization, session or token handling, secrets, cryptography, payment or money paths, what an externally-facing agent says (prompts, knowledge bases), CI or release config, database schema or data deletion — or anything you are not confident about.
           When in doubt between two tiers, always choose the HIGHER one (c1<c2<c3).'
+          DIFF_BYTES=$(cat /tmp/diff.bytes)
           DIFF=$(head -c 50000 /tmp/diff.patch)
+          FILES=$(cat /tmp/files.txt)
           PAYLOAD=$(jq -n --arg sys "$SYS" --arg title "${PR_TITLE:-}" --arg body "${PR_BODY:-}" \
-            --arg issue "$ISSUE_BODY" --arg diff "$DIFF" \
+            --arg issue "$ISSUE_BODY" --arg files "$FILES" --arg diff "$DIFF" --arg bytes "$DIFF_BYTES" \
             '{model:"claude-sonnet-5", max_tokens:400, thinking:{type:"disabled"}, system:$sys,
               messages:[{role:"user",
-                content:("PR TITLE:\n"+$title+"\n\nPR BODY:\n"+$body+"\n\nORIGINATING ISSUE BODY:\n"+$issue+"\n\nDIFF:\n"+$diff)}]}')
+                content:("PR TITLE:\n"+$title+"\n\nPR BODY:\n"+$body+"\n\nORIGINATING ISSUE BODY:\n"+$issue+"\n\nCHANGED FILES (complete list):\n"+$files+"\n\nDIFF ("+$bytes+" bytes; anything past 50000 is cut):\n"+$diff)}]}')
           RESP=$(curl -fsS https://api.anthropic.com/v1/messages \
             -H "x-api-key: ${ANTHROPIC_API_KEY}" \
             -H "anthropic-version: 2023-06-01" \
@@ -166,6 +210,11 @@ jobs:
             c1|c2|c3) : ;;
             *) TIER="c3"; RAT="classifier unavailable or unparseable; defaulting to C3 (an engineer with write access reviews) — 8 Sep 2026: an unparseable grade must never let a requester self-ship a change the model could not read";;
           esac
+          # A change the classifier could not read in full never merges on its
+          # own (14 Sep 2026): over the 50 KB budget, C1 becomes C2.
+          if [ "$TIER" = "c1" ] && [ "${DIFF_BYTES:-0}" -gt 50000 ]; then
+            TIER="c2"; RAT="diff is ${DIFF_BYTES} bytes and the classifier saw only the first 50000; a change it could not read in full waits for the requester (was: ${RAT})"
+          fi
           echo "tier=$TIER" >> "$GITHUB_OUTPUT"
           RAT_ONELINE=$(printf '%s' "$RAT" | tr '\n' ' ' | head -c 400)
           echo "rationale=$RAT_ONELINE" >> "$GITHUB_OUTPUT"
@@ -205,9 +254,18 @@ jobs:
           fi
           CH=""; TH=""; RQ=""
           ROUTE=""
+          # The routing marker names WHO may confirm a C2 merge and WHERE CASE
+          # posts. It is honoured only when CASE's bridge wrote the issue; a
+          # marker in anyone else's issue is ignored (14 Sep 2026).
           if [ -n "$NUM" ]; then
-            BODY=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" --jq '.body // ""' || true)
-            ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true)
+            IJ=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${NUM}" 2>/dev/null || echo '{}')
+            IA=$(printf '%s' "$IJ" | jq -r '.user.login // ""')
+            case "$IA" in
+              'breeze-case-bridge[bot]'|'breeze-case-bridge-core[bot]')
+                BODY=$(printf '%s' "$IJ" | jq -r '.body // ""')
+                ROUTE=$(printf '%s' "$BODY" | grep -oE '<!-- case-routing \{[^>]*\} -->' | head -1 | sed 's/<!-- case-routing //; s/ -->//' || true) ;;
+              *) echo "routing marker ignored: issue #${NUM} was filed by ${IA:-nobody}, not by CASE's bridge" ;;
+            esac
           fi
           # Fallback (5 Sep 2026): a create-lane scaffold PR has no originating
           # issue; the create workflow writes the same marker into the PR body.
@@ -219,6 +277,10 @@ jobs:
             TH=$(printf '%s' "$ROUTE" | jq -r '.thread // empty' 2>/dev/null || true)
             RQ=$(printf '%s' "$ROUTE" | jq -r '.requester // empty' 2>/dev/null || true)
           fi
+          # Shapes only: a Slack channel id, a Slack message ts, a Slack user id.
+          printf '%s' "$CH" | grep -qE '^[CDG][A-Z0-9]{6,}$' || CH=""
+          printf '%s' "$TH" | grep -qE '^[0-9]{10}\.[0-9]{6}$' || TH=""
+          printf '%s' "$RQ" | grep -qE '^[UW][A-Z0-9]{6,}$' || RQ=""
           echo "channel=$CH" >> "$GITHUB_OUTPUT"
           echo "thread=$TH" >> "$GITHUB_OUTPUT"
           echo "requester=$RQ" >> "$GITHUB_OUTPUT"
@@ -315,6 +377,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
@@ -335,7 +398,10 @@ jobs:
             sleep 20
           done
           [ "${PEND:-1}" = "0" ] || { echo "::error::checks did not finish in time"; exit 1; }
-          gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash --jq .merged
+          # Pinned to the commit this run screened, tiered and tested. If the
+          # branch moved in the meantime GitHub answers 409 and nothing merges
+          # (14 Sep 2026, Claude Security).
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash -f sha="${HEAD_SHA}" --jq .merged
 
       - name: Notify thread (merged)
         if: >-
@@ -368,10 +434,49 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
             -f body="CASE Merge run failed: ${RUN_URL} — classification or auto-merge did not complete; the PR is untouched and a human can take it from here." >/dev/null || true
 
+  # A person pushed to a CASE branch. Their commits are not CASE's work, so the
+  # PR leaves every automatic lane: tier labels come off, one comment says why,
+  # and a human with write access reviews it like any other PR (14 Sep 2026).
+  human-push:
+    if: >-
+      github.event.action == 'synchronize' &&
+      (github.event.pull_request.user.login == 'breeze-case[bot]' ||
+       github.event.pull_request.user.login == 'breeze-case-core[bot]') &&
+      github.event.sender.login != 'breeze-case[bot]' &&
+      github.event.sender.login != 'breeze-case-core[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mint repo token
+        id: repo-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.CASE_APP_ID }}
+          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+      - name: Remove tier labels, leave one note
+        env:
+          GH_TOKEN: ${{ steps.repo-token.outputs.token }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          WHO: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          for L in case-c1 case-c2 case-c3 case-confirmed; do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/labels/${L}" >/dev/null 2>&1 || true
+          done
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/labels" \
+            --input <(jq -n '{labels:["case-human-edited"]}') >/dev/null 2>&1 || true
+          gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+            --input <(jq -n --arg w "$WHO" '{body:("@" + $w + " pushed to this CASE branch, so CASE stops here: no tier, no automatic merge, no Slack confirmation. It is now an ordinary PR and needs a reviewer with write access.")}') >/dev/null
+          echo "human push by ${WHO}: PR #${PR_NUM} removed from the CASE lanes"
+
   confirmed-merge:
     if: >-
       github.event.action == 'labeled' &&
       github.event.label.name == 'case-confirmed' &&
+      (github.event.pull_request.user.login == 'breeze-case[bot]' ||
+       github.event.pull_request.user.login == 'breeze-case-core[bot]') &&
       (github.event.sender.login == 'breeze-case-bridge[bot]' ||
        github.event.sender.login == 'breeze-case-bridge-core[bot]' ||
        github.event.sender.login == 'martyadmin-breeze')
@@ -413,6 +518,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
 
       - name: Test gate (no tokens in env; PR code runs here)
         run: |
@@ -426,6 +532,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_NUM: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           for _ in $(seq 1 60); do
@@ -446,7 +553,10 @@ jobs:
             sleep 20
           done
           [ "${PEND:-1}" = "0" ] || { echo "::error::checks did not finish in time"; exit 1; }
-          gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash --jq .merged
+          # Pinned to the commit this run screened, tiered and tested. If the
+          # branch moved in the meantime GitHub answers 409 and nothing merges
+          # (14 Sep 2026, Claude Security).
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash -f sha="${HEAD_SHA}" --jq .merged
 
       - name: Notify thread (merged)
         env:
