@@ -42,13 +42,28 @@ env:
 
 jobs:
   classify:
+    # A PR opening fires several pull_request events within a second. The
+    # per-PR concurrency group keeps one and cancels the rest, so whichever
+    # survives decides whether this PR is ever tiered — and if the survivor is
+    # an event classify skips, the PR gets no tier at all and nothing retries.
+    # beamo-co/breeze-triage-bot#27 sat four days that way (13-17 Sep 2026),
+    # the sweep's own `case` label being the surviving event. So the last
+    # clause is a SELF-HEAL: any event classifies when no tier label exists
+    # yet. It only ever adds classification, never removes it, it cannot
+    # re-tier a human-edited PR, and once a tier lands the clause stops
+    # matching, so it terminates.
     if: >-
-      github.event.action != 'labeled' &&
       (github.event.pull_request.user.login == 'breeze-case[bot]' ||
        github.event.pull_request.user.login == 'breeze-case-core[bot]') &&
-      (github.event.action != 'synchronize' ||
-       github.event.sender.login == 'breeze-case[bot]' ||
-       github.event.sender.login == 'breeze-case-core[bot]')
+      !contains(github.event.pull_request.labels.*.name, 'case-human-edited') &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'reopened' ||
+       (github.event.action == 'synchronize' &&
+        (github.event.sender.login == 'breeze-case[bot]' ||
+         github.event.sender.login == 'breeze-case-core[bot]')) ||
+       (!contains(github.event.pull_request.labels.*.name, 'case-c1') &&
+        !contains(github.event.pull_request.labels.*.name, 'case-c2') &&
+        !contains(github.event.pull_request.labels.*.name, 'case-c3')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -365,9 +380,39 @@ jobs:
         run: |
           set -euo pipefail
           # This repo's own tests are part of the gate, not just hosted checks.
+          #
+          # The package manager comes from the lockfile, not an assumption.
+          # 9-17 Sep 2026: this step hardcoded npm, so on `stagehash` (pnpm +
+          # `turbo run test`) `npm ci` failed, `npm test` exited 127, and every
+          # C1 sweep PR stranded. Eight days, and the weekly report filed them
+          # as "nobody to review them" — a broken lane wearing the label of a
+          # missing reviewer. The install output was also sent to /dev/null,
+          # which is why a 127 took a log dive to find; a failed install now
+          # names itself and prints its tail.
           if [ -f package.json ] && jq -e '.scripts.test' package.json >/dev/null; then
-            (npm ci --no-audit --no-fund || npm install --no-audit --no-fund) >/dev/null 2>&1
-            npm test
+            if [ -f pnpm-lock.yaml ]; then
+              PM=pnpm
+              corepack enable >/dev/null 2>&1 || npm install -g pnpm >/dev/null 2>&1 || true
+              INSTALL="pnpm install --frozen-lockfile || pnpm install"
+            elif [ -f yarn.lock ]; then
+              PM=yarn
+              INSTALL="yarn install --immutable || yarn install --frozen-lockfile || yarn install"
+            else
+              PM=npm
+              INSTALL="npm ci --no-audit --no-fund || npm install --no-audit --no-fund"
+            fi
+            echo "package manager: $PM"
+            set +e
+            LOG="${RUNNER_TEMP:-/tmp}/case-install.log"
+            ( eval "$INSTALL" ) >"$LOG" 2>&1
+            RC=$?
+            set -e
+            if [ "$RC" != "0" ]; then
+              echo "::error::dependency install failed with $PM (exit $RC) — the test gate cannot run, so this PR is not merged"
+              tail -40 "$LOG" || true
+              exit 1
+            fi
+            "$PM" test
           fi
 
       - name: C1 — wait for checks, merge
