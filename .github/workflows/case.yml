@@ -1,7 +1,10 @@
-# CASE — mention/label trigger (HARDENED Jun 16). Two-token split: the agent
-# runs with a token scoped to THIS repo only (no hub), so an injected run
-# cannot write to the shared case hub. Hub fetch/write-back use a separate
-# hub-only token the agent never sees. Rails ride in this workflow.
+# CASE — mention/label trigger (HARDENED Jun 16; MINTER 18 Sep 2026).
+# No App private key lives in this repo any more. The job proves who it is with
+# its GitHub OIDC token and asks the CASE minter (Cloud Run, breeze-it-tools,
+# IAM-gated) for two things: an installation token for THIS repo only, and hub
+# reads/writes done on its behalf on a path allowlist (its own memory file, a
+# ledger append). The agent runs with the repo token; it never holds anything
+# that reaches the hub or another repo. Rails ride in this workflow.
 name: CASE
 
 on:
@@ -16,7 +19,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
-  id-token: write
+  id-token: write   # the OIDC token IS the credential now (WIF + minter)
 
 concurrency:
   group: case-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
@@ -36,23 +39,57 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Mint hub token (fetch + write-back ONLY; never exposed to the agent)
-        id: hub-token
-        uses: actions/create-github-app-token@v3
+      - name: Google identity for the minter (WIF → case-minter-caller)
+        id: gauth
+        uses: google-github-actions/auth@v3
         with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: case
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
 
-      - name: Mint repo token (the agent runs with THIS — this repo only, no hub)
+      - name: Minter client (functions only; tokens stay in step env, never on disk)
+        run: |
+          mkdir -p "$RUNNER_TEMP/case"
+          cat > "$RUNNER_TEMP/case/minter.sh" <<'SH'
+          MINTER="https://case-minter-1012842080261.asia-southeast1.run.app"
+          _ghjwt() {
+            curl -sS -f -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=case-minter" | jq -r .value
+          }
+          # minter_token -> prints an installation token for THIS repo only
+          minter_token() {
+            curl -sS -f -X POST "$MINTER/token" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d '{}' | jq -r .token
+          }
+          # minter_hub <get|put|append> <hub-path> [local-file] [message] -> prints the JSON reply
+          minter_hub() {
+            local body
+            if [ -n "${3:-}" ]; then
+              body=$(jq -n --arg op "$1" --arg p "$2" --arg c "$(base64 -w0 < "$3")" --arg m "${4:-}" \
+                     '{op:$op,path:$p,content_b64:$c,message:$m}')
+            else
+              body=$(jq -n --arg op "$1" --arg p "$2" '{op:$op,path:$p}')
+            fi
+            curl -sS -f -X POST "$MINTER/hub" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d "$body"
+          }
+          SH
+
+      - name: Mint repo token (this repo only; the key never leaves the minter)
         id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
+        env:
+          GID: ${{ steps.gauth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
+          TOK=$(minter_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::minter returned no token"; exit 1; }
+          echo "::add-mask::$TOK"
+          echo "token=$TOK" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
         with:
@@ -91,14 +128,19 @@ jobs:
           }
           JSON
 
-      - name: Fetch CASE memory from hub
+      - name: Fetch CASE memory from hub (via the minter)
         env:
-          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          GID: ${{ steps.gauth.outputs.id_token }}
+          REPO_NAME: ${{ github.event.repository.name }}
         run: |
+          set -uo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
           mkdir -p .case
-          gh api "repos/${{ github.repository_owner }}/case/contents/memory/${{ github.event.repository.name }}.md" \
-            -H "Accept: application/vnd.github.raw" > .case/memory.md \
-            || echo "(no memory file yet — first run)" > .case/memory.md
+          if R=$(minter_hub get "memory/${REPO_NAME}.md") && [ "$(jq -r .found <<<"$R")" = "true" ]; then
+            jq -r .content_b64 <<<"$R" | base64 -d > .case/memory.md
+          else
+            echo "(no memory file yet — first run)" > .case/memory.md
+          fi
           cp .case/memory.md .case/memory.orig.md
 
       - name: Run CASE
@@ -116,42 +158,29 @@ jobs:
             --settings ${{ runner.temp }}/case/settings.json
             --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link."
 
-      - name: Sync CASE memory + ledger to hub
-        if: always() && steps.hub-token.outputs.token != ''
+      - name: Sync CASE memory + ledger to hub (via the minter; policed paths)
+        if: always() && steps.gauth.outputs.id_token != ''
         env:
-          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          GID: ${{ steps.gauth.outputs.id_token }}
           REPO_NAME: ${{ github.event.repository.name }}
-          OWNER: ${{ github.repository_owner }}
         run: |
           # Write-back is non-critical: a hiccup logs a ::warning:: but never reds the run.
-          # Everything quoted; explicit sha if/else (no ${VAR:+} word-splitting).
-          put_hub() {  # $1=hub-path  $2=local-file  $3=commit message
-            local b64 sha
-            b64=$(base64 -w0 < "$2") || { echo "::warning::base64 failed for $2"; return 0; }
-            sha=$(gh api "repos/${OWNER}/case/contents/$1" --jq .sha 2>/dev/null || true)
-            [ "$sha" = "null" ] && sha=""
-            if [ -n "$sha" ]; then
-              gh api -X PUT "repos/${OWNER}/case/contents/$1" -f message="$3" -f content="$b64" -f sha="$sha" >/dev/null \
-                && echo "hub: updated $1" || echo "::warning::hub update failed for $1"
-            else
-              gh api -X PUT "repos/${OWNER}/case/contents/$1" -f message="$3" -f content="$b64" >/dev/null \
-                && echo "hub: created $1" || echo "::warning::hub create failed for $1"
-            fi
-          }
+          set -uo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
           if [ -f .case/memory.md ] && ! cmp -s .case/memory.md .case/memory.orig.md; then
-            put_hub "memory/${REPO_NAME}.md" .case/memory.md "CASE memory: ${REPO_NAME} (run ${{ github.run_id }})"
+            minter_hub put "memory/${REPO_NAME}.md" .case/memory.md "run ${{ github.run_id }}" >/dev/null \
+              && echo "hub: memory updated" || echo "::warning::hub memory write failed"
           fi
           if [ -s .case/ledger-row.md ]; then
-            gh api "repos/${OWNER}/case/contents/ledger.md" -H "Accept: application/vnd.github.raw" > .case/ledger.md 2>/dev/null || : > .case/ledger.md
-            cat .case/ledger-row.md >> .case/ledger.md
-            put_hub "ledger.md" .case/ledger.md "CASE ledger: ${REPO_NAME} (run ${{ github.run_id }})"
+            minter_hub append "ledger.md" .case/ledger-row.md "run ${{ github.run_id }}" >/dev/null \
+              && echo "hub: ledger appended" || echo "::warning::hub ledger append failed"
           fi
 
       - name: Report run failure on the triggering thread
         # Closes the silent-death gap: if any step above failed, tell the
         # requester on the issue/PR that summoned CASE. Posts as the breeze-case
         # App (repo-scoped token) — body has no "/case", so it cannot self-trigger.
-        if: failure()
+        if: failure() && steps.app-token.outputs.token != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
