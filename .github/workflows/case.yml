@@ -18,7 +18,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
-  issues: read
+  issues: write    # only so the failure reporter can still speak when no token was minted (25 Sep 2026)
   id-token: write   # the OIDC token IS the credential now (WIF + minter)
 
 concurrency:
@@ -196,9 +196,14 @@ jobs:
         # Closes the silent-death gap: if any step above failed, tell the
         # requester on the issue/PR that summoned CASE. Posts as the breeze-case
         # App (repo-scoped token) — body has no "/case", so it cannot self-trigger.
-        if: failure() && steps.app-token.outputs.token != ''
+        # Runs on ANY failure, including one before a token was minted (25 Sep 2026,
+        # canary b: the WIF step died and this step was skipped, so the requester
+        # saw nothing). Falls back to the job's own token, which can comment on
+        # issues; a comment from github-actions[bot] carries no "/case" so it
+        # cannot re-trigger this workflow.
+        if: failure()
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
         run: |
           NUM="${{ github.event.issue.number || github.event.pull_request.number }}"
           [ -z "$NUM" ] && exit 0
