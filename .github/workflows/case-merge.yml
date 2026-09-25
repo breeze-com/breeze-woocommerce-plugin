@@ -208,10 +208,17 @@ jobs:
           # Fourth condition (14 Sep 2026): the base branch must actually be an
           # empty CASE-created repo. The marker and the branch name are chosen
           # by whoever wrote the PR; the state of main is not.
+          # Fifth condition (25 Sep 2026): the diff touches no automation/ file.
+          # The exemption rests on "going live is gated separately", and for a
+          # scheduled automation it is not: merging automation/run.sh IS going
+          # live (the hub runs it and posts its output as CASE). The first
+          # canary automation's scaffold was tiered C2 by this shortcut with
+          # the C3 screen already showing the hit.
           if printf '%s' "${PR_BODY:-}" | grep -q '<!-- case-scaffold -->' \
              && [ "${HEAD_REF:-}" = "case/scaffold" ] \
              && [ "$(cat /tmp/base_empty)" = "1" ] \
-             && ! grep -qE '^\.github/' /tmp/files.txt; then
+             && ! grep -qE '^\.github/' /tmp/files.txt \
+             && ! grep -qE '(^|/)automation/' /tmp/files.txt; then
             echo "tier=c2" >> "$GITHUB_OUTPUT"
             {
               echo "rationale<<EOF"
