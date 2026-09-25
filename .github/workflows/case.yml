@@ -112,7 +112,31 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
 
+
+      # ONE PR PER ISSUE (25 Sep 2026). Sarah's "Add a short README" issue got four
+      # PRs in seven hours because every `/case` nudge re-ran the lane. If an open
+      # CASE PR already exists for this issue, say so on the issue and stop; a
+      # comment containing `/case redo` runs anyway (the human closes the old PR).
+      - name: Already answered? (one open CASE PR per issue)
+        id: dedupe
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          BODY: ${{ github.event.comment.body }}
+          IS_ISSUE: ${{ github.event.issue && !github.event.issue.pull_request }}
+        run: |
+          set -uo pipefail
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          [ "$IS_ISSUE" = "true" ] && [ -n "${NUM:-}" ] || exit 0
+          printf '%s' "${BODY:-}" | grep -qi '/case redo' && { echo "redo requested — running"; exit 0; }
+          EXISTING=$(gh pr list -R "${{ github.repository }}" --state open --json number,headRefName             --jq --arg p "case/issue-${NUM}-" '[.[] | select(.headRefName | startswith($p))] | .[0].number // empty' 2>/dev/null || true)
+          if [ -n "$EXISTING" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            gh issue comment "$NUM" -R "${{ github.repository }}" --body "There is already an open CASE pull request for this issue: #${EXISTING}. Review that one; if you want it redone from scratch, comment \`/case redo\`." >/dev/null 2>&1 || true
+            echo "::notice::open CASE PR #${EXISTING} already covers issue #${NUM}; nothing to do"
+          fi
       - name: Write CASE permission policy (workflow-borne, run-scoped)
+        if: steps.dedupe.outputs.skip != 'true'
         run: |
           mkdir -p "$RUNNER_TEMP/case"
           cat > "$RUNNER_TEMP/case/settings.json" <<'JSON'
@@ -145,6 +169,7 @@ jobs:
           JSON
 
       - name: Fetch CASE memory from hub (via the minter)
+        if: steps.dedupe.outputs.skip != 'true'
         env:
           GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           REPO_NAME: ${{ github.event.repository.name }}
@@ -160,6 +185,7 @@ jobs:
           cp .case/memory.md .case/memory.orig.md
 
       - name: Run CASE
+        if: steps.dedupe.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -175,7 +201,7 @@ jobs:
             --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link."
 
       - name: Sync CASE memory + ledger to hub (via the minter; policed paths)
-        if: always() && (steps.gauth.outputs.id_token != '' || steps.gauth2.outputs.id_token != '')
+        if: always() && steps.dedupe.outputs.skip != 'true' && (steps.gauth.outputs.id_token != '' || steps.gauth2.outputs.id_token != '')
         env:
           GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           REPO_NAME: ${{ github.event.repository.name }}
