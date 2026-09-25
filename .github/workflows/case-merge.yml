@@ -70,6 +70,22 @@ jobs:
     steps:
       - name: Google identity for the minter (WIF → case-minter-caller)
         id: gauth
+        # Google IAM has answered this with a transient 503 (25 Sep 2026, canary b);
+        # one retry below, then the job fails for real.
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Google identity for the minter, second attempt
+        id: gauth2
+        if: steps.gauth.outcome == 'failure'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
@@ -111,7 +127,7 @@ jobs:
       - name: Mint repo token (this repo only; the key never leaves the minter)
         id: repo-token
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
         run: |
           set -euo pipefail
           . "$RUNNER_TEMP/case/minter.sh"
@@ -368,7 +384,7 @@ jobs:
       - name: Notify thread (PR opened + tier)
         if: steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           TIER: ${{ steps.tier.outputs.tier }}
           RAT: ${{ steps.tier.outputs.rationale }}
           CH: ${{ steps.routing.outputs.channel }}
@@ -491,7 +507,7 @@ jobs:
           success() && steps.tier.outputs.tier == 'c1' &&
           steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           CH: ${{ steps.routing.outputs.channel }}
           TH: ${{ steps.routing.outputs.thread }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -533,6 +549,22 @@ jobs:
     steps:
       - name: Google identity for the minter (WIF → case-minter-caller)
         id: gauth
+        # Google IAM has answered this with a transient 503 (25 Sep 2026, canary b);
+        # one retry below, then the job fails for real.
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Google identity for the minter, second attempt
+        id: gauth2
+        if: steps.gauth.outcome == 'failure'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
@@ -574,7 +606,7 @@ jobs:
       - name: Mint repo token (this repo only; the key never leaves the minter)
         id: repo-token
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
         run: |
           set -euo pipefail
           . "$RUNNER_TEMP/case/minter.sh"
@@ -613,6 +645,22 @@ jobs:
     steps:
       - name: Google identity for the minter (WIF → case-minter-caller)
         id: gauth
+        # Google IAM has answered this with a transient 503 (25 Sep 2026, canary b);
+        # one retry below, then the job fails for real.
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Google identity for the minter, second attempt
+        id: gauth2
+        if: steps.gauth.outcome == 'failure'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
@@ -654,7 +702,7 @@ jobs:
       - name: Mint repo token (this repo only; the key never leaves the minter)
         id: repo-token
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
         run: |
           set -euo pipefail
           . "$RUNNER_TEMP/case/minter.sh"
@@ -723,7 +771,7 @@ jobs:
 
       - name: Notify thread (merged)
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           REPO_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -769,7 +817,7 @@ jobs:
       - name: Notify thread (merge failed)
         if: failure()
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           REPO_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
