@@ -41,6 +41,22 @@ jobs:
     steps:
       - name: Google identity for the minter (WIF → case-minter-caller)
         id: gauth
+        # Google IAM has answered this with a transient 503 (25 Sep 2026, canary b);
+        # one retry below, then the job fails for real.
+        continue-on-error: true
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Google identity for the minter, second attempt
+        id: gauth2
+        if: steps.gauth.outcome == 'failure'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
@@ -82,7 +98,7 @@ jobs:
       - name: Mint repo token (this repo only; the key never leaves the minter)
         id: app-token
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
         run: |
           set -euo pipefail
           . "$RUNNER_TEMP/case/minter.sh"
@@ -130,7 +146,7 @@ jobs:
 
       - name: Fetch CASE memory from hub (via the minter)
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           set -uo pipefail
@@ -159,9 +175,9 @@ jobs:
             --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link."
 
       - name: Sync CASE memory + ledger to hub (via the minter; policed paths)
-        if: always() && steps.gauth.outputs.id_token != ''
+        if: always() && (steps.gauth.outputs.id_token != '' || steps.gauth2.outputs.id_token != '')
         env:
-          GID: ${{ steps.gauth.outputs.id_token }}
+          GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
           # Write-back is non-critical: a hiccup logs a ::warning:: but never reds the run.
