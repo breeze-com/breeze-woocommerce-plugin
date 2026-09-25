@@ -172,7 +172,7 @@ jobs:
           # auth surfaces, external-agent voice (prompts/knowledge), schema/
           # migrations, deploy config. Over-matching is fine — it escalates to
           # a human, never the other way.
-          C3RE='^\.github/|(^|/)\.env|(^|/)package(-lock)?\.json$|(^|/)yarn\.lock$|(^|/)pnpm-lock\.yaml$|(^|/)requirements[^/]*\.txt$|(^|/)Pipfile|(^|/)poetry\.lock$|(^|/)go\.(mod|sum)$|(^|/)Cargo\.(toml|lock)$|(^|/)Gemfile|(^|/)composer\.(json|lock)$|(^|/)middleware\.[jt]sx?$|secret|credential|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)prompts?/|system_prompt|knowledge|(^|/)migrations?/|\.sql$|(^|/)vercel\.json$|(^|/)Dockerfile|(^|/)railway\.(json|toml)$|(^|/)Procfile$|(^|/)app\.ya?ml$|(^|/)serverless\.ya?ml$'
+          C3RE='^\.github/|(^|/)\.env|(^|/)package(-lock)?\.json$|(^|/)yarn\.lock$|(^|/)pnpm-lock\.yaml$|(^|/)requirements[^/]*\.txt$|(^|/)Pipfile|(^|/)poetry\.lock$|(^|/)go\.(mod|sum)$|(^|/)Cargo\.(toml|lock)$|(^|/)Gemfile|(^|/)composer\.(json|lock)$|(^|/)middleware\.[jt]sx?$|secret|credential|\.pem$|\.key$|\.p12$|\.pfx$|(^|/)prompts?/|system_prompt|knowledge|(^|/)automation/|(^|/)migrations?/|\.sql$|(^|/)vercel\.json$|(^|/)Dockerfile|(^|/)railway\.(json|toml)$|(^|/)Procfile$|(^|/)app\.ya?ml$|(^|/)serverless\.ya?ml$'
           HITS=$( (grep -iE "$C3RE" /tmp/files.txt || true) | head -20 )
           # Positive auth pattern. The old form dropped every path containing
           # 'author', which silently excluded authorization/authorize files
