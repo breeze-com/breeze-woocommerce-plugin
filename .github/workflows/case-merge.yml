@@ -30,6 +30,7 @@ permissions:
   contents: read
   pull-requests: read
   issues: read
+  id-token: write   # the OIDC token IS the credential now (WIF + minter), 18 Sep 2026
 
 concurrency:
   group: case-merge-${{ github.event.pull_request.number }}
@@ -67,23 +68,58 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Mint repo token
-        id: repo-token
-        uses: actions/create-github-app-token@v3
+      - name: Google identity for the minter (WIF → case-minter-caller)
+        id: gauth
+        uses: google-github-actions/auth@v3
         with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
 
-      - name: Mint hub token (notify relay only)
-        id: hub-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: case
+      - name: Minter client (functions only; tokens stay in step env, never on disk)
+        run: |
+          mkdir -p "$RUNNER_TEMP/case"
+          cat > "$RUNNER_TEMP/case/minter.sh" <<'SH'
+          MINTER="https://case-minter-1012842080261.asia-southeast1.run.app"
+          _ghjwt() {
+            curl -sS -f -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=case-minter" | jq -r .value
+          }
+          # minter_token -> prints an installation token for THIS repo only
+          minter_token() {
+            curl -sS -f -X POST "$MINTER/token" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d '{}' | jq -r .token
+          }
+          # minter_hub <get|put|append> <hub-path> [local-file] [message] -> prints the JSON reply
+          minter_hub() {
+            local body
+            if [ -n "${3:-}" ]; then
+              body=$(jq -n --arg op "$1" --arg p "$2" --arg c "$(base64 -w0 < "$3")" --arg m "${4:-}" \
+                     '{op:$op,path:$p,content_b64:$c,message:$m}')
+            else
+              body=$(jq -n --arg op "$1" --arg p "$2" '{op:$op,path:$p}')
+            fi
+            curl -sS -f -X POST "$MINTER/hub" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d "$body"
+          }
+          SH
+
+      - name: Mint repo token (this repo only; the key never leaves the minter)
+        id: repo-token
+        env:
+          GID: ${{ steps.gauth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
+          TOK=$(minter_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::minter returned no token"; exit 1; }
+          echo "::add-mask::$TOK"
+          echo "token=$TOK" >> "$GITHUB_OUTPUT"
+
 
       - uses: actions/checkout@v6
         with:
@@ -332,7 +368,7 @@ jobs:
       - name: Notify thread (PR opened + tier)
         if: steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
-          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          GID: ${{ steps.gauth.outputs.id_token }}
           TIER: ${{ steps.tier.outputs.tier }}
           RAT: ${{ steps.tier.outputs.rationale }}
           CH: ${{ steps.routing.outputs.channel }}
@@ -343,6 +379,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
           # Slack register (7 Sep 2026): ONE message per PR round, in plain
           # words. For C2/C3 the preview lane posts that message (link + how
           # to confirm); this step only queues the preview and speaks only if
@@ -352,7 +389,8 @@ jobs:
           queue_preview() {
             PF="preview/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}.json"
             PB64=$(jq -n --arg r "$GITHUB_REPOSITORY" --arg p "$PR_NUM" --arg c "$CH" --arg t "$TH" --arg q "$RQ" --arg x "$TIER" --arg s "$T" '{repo:$r,pr:$p,channel:$c,thread:$t,requester:$q,tier:$x,title:$s}' | base64 -w0)
-            gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${PF}" -f message="preview: ${PF}" -f content="$PB64" >/dev/null
+            printf '%s' "$PB64" | base64 -d > "$RUNNER_TEMP/case/queue.json"
+            minter_hub put "${PF}" "$RUNNER_TEMP/case/queue.json" "preview" >/dev/null
           }
           TEXT=""
           case "$TIER" in
@@ -369,8 +407,8 @@ jobs:
           [ -n "$TEXT" ] || { echo "preview queued; the preview lane posts the one message for this PR"; exit 0; }
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-opened.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
-          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
-            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+          printf '%s' "$B64" | base64 -d > "$RUNNER_TEMP/case/queue.json"
+          minter_hub put "${FN}" "$RUNNER_TEMP/case/queue.json" "notify" >/dev/null \
             || echo "::warning::notify relay failed"
 
       - name: C1 — test gate (no tokens in env; PR code runs here)
@@ -453,7 +491,7 @@ jobs:
           success() && steps.tier.outputs.tier == 'c1' &&
           steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
-          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          GID: ${{ steps.gauth.outputs.id_token }}
           CH: ${{ steps.routing.outputs.channel }}
           TH: ${{ steps.routing.outputs.thread }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -461,12 +499,13 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
           T="${PR_TITLE#\[CASE\] }"
           TEXT="<${PR_URL}|PR #${PR_NUM}> is merged — ${T}. If this tool auto-deploys, the change is rolling out now."
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
-          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
-            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+          printf '%s' "$B64" | base64 -d > "$RUNNER_TEMP/case/queue.json"
+          minter_hub put "${FN}" "$RUNNER_TEMP/case/queue.json" "notify" >/dev/null \
             || echo "::warning::notify relay failed"
 
       - name: Report failure on the PR
@@ -492,14 +531,58 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Mint repo token
-        id: repo-token
-        uses: actions/create-github-app-token@v3
+      - name: Google identity for the minter (WIF → case-minter-caller)
+        id: gauth
+        uses: google-github-actions/auth@v3
         with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Minter client (functions only; tokens stay in step env, never on disk)
+        run: |
+          mkdir -p "$RUNNER_TEMP/case"
+          cat > "$RUNNER_TEMP/case/minter.sh" <<'SH'
+          MINTER="https://case-minter-1012842080261.asia-southeast1.run.app"
+          _ghjwt() {
+            curl -sS -f -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=case-minter" | jq -r .value
+          }
+          # minter_token -> prints an installation token for THIS repo only
+          minter_token() {
+            curl -sS -f -X POST "$MINTER/token" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d '{}' | jq -r .token
+          }
+          # minter_hub <get|put|append> <hub-path> [local-file] [message] -> prints the JSON reply
+          minter_hub() {
+            local body
+            if [ -n "${3:-}" ]; then
+              body=$(jq -n --arg op "$1" --arg p "$2" --arg c "$(base64 -w0 < "$3")" --arg m "${4:-}" \
+                     '{op:$op,path:$p,content_b64:$c,message:$m}')
+            else
+              body=$(jq -n --arg op "$1" --arg p "$2" '{op:$op,path:$p}')
+            fi
+            curl -sS -f -X POST "$MINTER/hub" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d "$body"
+          }
+          SH
+
+      - name: Mint repo token (this repo only; the key never leaves the minter)
+        id: repo-token
+        env:
+          GID: ${{ steps.gauth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
+          TOK=$(minter_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::minter returned no token"; exit 1; }
+          echo "::add-mask::$TOK"
+          echo "token=$TOK" >> "$GITHUB_OUTPUT"
+
       - name: Remove tier labels, leave one note
         env:
           GH_TOKEN: ${{ steps.repo-token.outputs.token }}
@@ -528,23 +611,58 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Mint repo token
-        id: repo-token
-        uses: actions/create-github-app-token@v3
+      - name: Google identity for the minter (WIF → case-minter-caller)
+        id: gauth
+        uses: google-github-actions/auth@v3
         with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
+          workload_identity_provider: projects/1012842080261/locations/global/workloadIdentityPools/github-case/providers/github
+          service_account: case-minter-caller@breeze-it-tools.iam.gserviceaccount.com
+          token_format: id_token
+          id_token_audience: https://case-minter-1012842080261.asia-southeast1.run.app
+          id_token_include_email: true
+          create_credentials_file: false
+          export_environment_variables: false
 
-      - name: Mint hub token (notify relay only)
-        id: hub-token
-        uses: actions/create-github-app-token@v3
-        with:
-          app-id: ${{ vars.CASE_APP_ID }}
-          private-key: ${{ secrets.CASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: case
+      - name: Minter client (functions only; tokens stay in step env, never on disk)
+        run: |
+          mkdir -p "$RUNNER_TEMP/case"
+          cat > "$RUNNER_TEMP/case/minter.sh" <<'SH'
+          MINTER="https://case-minter-1012842080261.asia-southeast1.run.app"
+          _ghjwt() {
+            curl -sS -f -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=case-minter" | jq -r .value
+          }
+          # minter_token -> prints an installation token for THIS repo only
+          minter_token() {
+            curl -sS -f -X POST "$MINTER/token" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d '{}' | jq -r .token
+          }
+          # minter_hub <get|put|append> <hub-path> [local-file] [message] -> prints the JSON reply
+          minter_hub() {
+            local body
+            if [ -n "${3:-}" ]; then
+              body=$(jq -n --arg op "$1" --arg p "$2" --arg c "$(base64 -w0 < "$3")" --arg m "${4:-}" \
+                     '{op:$op,path:$p,content_b64:$c,message:$m}')
+            else
+              body=$(jq -n --arg op "$1" --arg p "$2" '{op:$op,path:$p}')
+            fi
+            curl -sS -f -X POST "$MINTER/hub" -H "Authorization: Bearer $GID" \
+              -H "X-GitHub-OIDC: $(_ghjwt)" -H 'Content-Type: application/json' -d "$body"
+          }
+          SH
+
+      - name: Mint repo token (this repo only; the key never leaves the minter)
+        id: repo-token
+        env:
+          GID: ${{ steps.gauth.outputs.id_token }}
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
+          TOK=$(minter_token)
+          [ -n "$TOK" ] && [ "$TOK" != "null" ] || { echo "::error::minter returned no token"; exit 1; }
+          echo "::add-mask::$TOK"
+          echo "token=$TOK" >> "$GITHUB_OUTPUT"
+
 
       - name: Verify tier labels (C3 never merges here)
         env:
@@ -605,13 +723,14 @@ jobs:
 
       - name: Notify thread (merged)
         env:
-          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          GID: ${{ steps.gauth.outputs.id_token }}
           REPO_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_NUM: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
           NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
           CH=""; TH=""; ROUTE=""
           if [ -n "$NUM" ]; then
@@ -630,8 +749,8 @@ jobs:
           TEXT="Done — <${PR_URL}|PR #${PR_NUM}> is merged. If this tool auto-deploys, your change is rolling out now."
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-merged.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
-          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
-            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+          printf '%s' "$B64" | base64 -d > "$RUNNER_TEMP/case/queue.json"
+          minter_hub put "${FN}" "$RUNNER_TEMP/case/queue.json" "notify" >/dev/null \
             || echo "::warning::notify relay failed"
 
       - name: Report failure on the PR
@@ -650,7 +769,7 @@ jobs:
       - name: Notify thread (merge failed)
         if: failure()
         env:
-          GH_TOKEN: ${{ steps.hub-token.outputs.token }}
+          GID: ${{ steps.gauth.outputs.id_token }}
           REPO_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_URL: ${{ github.event.pull_request.html_url }}
@@ -658,6 +777,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -uo pipefail
+          . "$RUNNER_TEMP/case/minter.sh"
           NUM=$(printf '%s' "${PR_BODY:-}" | grep -oiE '(closes|fixes|resolves|addresses issue) #[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
           ROUTE=""
           if [ -n "$NUM" ]; then
@@ -675,6 +795,6 @@ jobs:
           TEXT="${MENTION}I couldn't merge <${PR_URL}|PR #${PR_NUM}>: the \"${STEP}\" step failed, so nothing changed. Ask me what went wrong and I'll read the log, or an engineer with write access can merge it on GitHub."
           FN="notify/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}-failed.json"
           B64=$(jq -n --arg c "$CH" --arg t "$TH" --arg x "$TEXT" '{channel:$c,thread:$t,text:$x}' | base64 -w0)
-          gh api -X PUT "repos/${GITHUB_REPOSITORY_OWNER}/case/contents/${FN}" \
-            -f message="notify: ${FN}" -f content="$B64" >/dev/null \
+          printf '%s' "$B64" | base64 -d > "$RUNNER_TEMP/case/queue.json"
+          minter_hub put "${FN}" "$RUNNER_TEMP/case/queue.json" "notify" >/dev/null \
             || echo "::warning::notify relay failed"
