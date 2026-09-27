@@ -1273,10 +1273,22 @@ class WC_Breeze_Payment_Gateway extends WC_Payment_Gateway {
     /**
      * Webhook handler
      */
+    /**
+     * Return the raw webhook request body.
+     *
+     * Extracted from webhook_handler() so that tests can subclass and
+     * override this method instead of requiring a live HTTP request.
+     *
+     * @return string
+     */
+    protected function get_webhook_payload() {
+        return file_get_contents( 'php://input' );
+    }
+
     public function webhook_handler() {
-        
+
         // Get the raw POST data
-        $payload = file_get_contents( 'php://input' );
+        $payload = $this->get_webhook_payload();
         
         // Parse webhook data
         $webhook_data = json_decode( $payload, true );
