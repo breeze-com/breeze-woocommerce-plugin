@@ -27,6 +27,15 @@ concurrency:
 
 jobs:
   case:
+    # Who may trigger by comment: org members/owners typing /case (the
+    # review-to-fix loop, Jun 16 2026), and CASE's own two bridge Apps (30 Sep
+    # 2026): a follow-up ask in a Slack thread that already has an open CASE PR
+    # is relayed by the bridge as a /case comment ON that PR, so the fix lands on
+    # the existing branch instead of a fresh PR off main. Four divergent PRs on
+    # one demo in an hour is what this line prevents. The bridge comments only
+    # from its envelope-gated tool loop (a workspace member asked), and the
+    # action's allowed_bots below already trusts the same two Apps on the label
+    # path. Never add breeze-case itself here: self-trigger loop.
     if: >-
       (
         github.event_name == 'issues' &&
@@ -34,7 +43,10 @@ jobs:
       ) || (
         github.event_name != 'issues' &&
         contains(github.event.comment.body, '/case') &&
-        contains(fromJSON('["MEMBER","OWNER"]'), github.event.comment.author_association)
+        (
+          contains(fromJSON('["MEMBER","OWNER"]'), github.event.comment.author_association) ||
+          contains(fromJSON('["breeze-case-bridge[bot]","breeze-case-bridge-core[bot]"]'), github.event.comment.user.login)
+        )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
