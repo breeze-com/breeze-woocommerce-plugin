@@ -207,7 +207,7 @@ jobs:
           label_trigger: "case"
           branch_prefix: "case/"
           claude_args: |
-            --model claude-sonnet-4-6
+            --model ${{ vars.CASE_MODEL || 'claude-sonnet-5-5' }}
             --max-turns 50
             --settings ${{ runner.temp }}/case/settings.json
             --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link."
