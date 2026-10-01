@@ -197,7 +197,7 @@ jobs:
             a valid outcome. Do not touch .github/workflows, secrets, deploy
             config, or the case hub repo.
           claude_args: |
-            --model claude-sonnet-4-6
+            --model ${{ vars.CASE_MODEL || 'claude-sonnet-5-5' }}
             --max-turns 80
             --settings ${{ runner.temp }}/case/settings.json
 
