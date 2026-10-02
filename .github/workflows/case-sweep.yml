@@ -196,9 +196,15 @@ jobs:
             authenticated). One bounded PR maximum tonight; a clean skip is
             a valid outcome. Do not touch .github/workflows, secrets, deploy
             config, or the case hub repo.
+          # --strict-mcp-config: ignore any MCP servers the REPO declares (.mcp.json).
+          # 1 Oct 2026: payment_dashboard's .mcp.json pointed the agent at mcp.figma.com
+          # and the run tried to connect; the proxy refused it, but a repo file must not
+          # be able to hand the agent a connection. The action's own --mcp-config
+          # (its GitHub tools) is unaffected.
           claude_args: |
             --model ${{ vars.CASE_MODEL || 'claude-sonnet-5-5' }}
             --max-turns 80
+            --strict-mcp-config
             --settings ${{ runner.temp }}/case/settings.json
 
       - name: Sync CASE memory + ledger to hub (through the minter)
