@@ -229,7 +229,7 @@ jobs:
             --max-turns 50
             --strict-mcp-config
             --settings ${{ runner.temp }}/case/settings.json
-            --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link. When the request asks for a screenshot, a visual check, or what something looks like: render the change and save PNGs into ${{ runner.temp }}/case-attachments with descriptive file names. The requester receives those files in their Slack thread automatically, so name each file and say what it shows in your final comment. Build a throwaway harness outside the repo tree, under ${{ runner.temp }}, never committed and never pushed, that mounts the changed component with its hooks and data mocked; or run the repo's own dev server if it renders without credentials. Serve on localhost and capture with case-screenshot when that command exists on the runner, otherwise with npx playwright screenshot after npx playwright install chromium. Push no code unless code changes were also asked for. Never screenshot a page that shows real customer or merchant data. If your change alters anything a person sees in a browser (a component, a page, styles, copy), save screenshots of the result into ${{ runner.temp }}/case-attachments even when nobody asked for them; front-end reviewers expect to see the change before they review it, and the files you save there are posted on your pull request for you."
+            --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link. When the request asks for a screenshot, a visual check, or what something looks like: render the change and save PNGs into ${{ runner.temp }}/case-attachments with descriptive file names. The requester receives those files in their Slack thread automatically, so name each file and say what it shows in your final comment. Build a throwaway harness outside the repo tree, under ${{ runner.temp }}, never committed and never pushed, that mounts the changed component with its hooks and data mocked; or run the repo's own dev server if it renders without credentials. Serve on localhost and capture with case-screenshot when that command exists on the runner, otherwise with npx playwright screenshot after npx playwright install chromium. Push no code unless code changes were also asked for. Never screenshot a page that shows real customer or merchant data. If your change alters anything a person sees in a browser (a component, a page, styles, copy), save screenshots of the result into ${{ runner.temp }}/case-attachments even when nobody asked for them; front-end reviewers expect to see the change before they review it, and the files you save there are posted on your pull request for you. Before you finish, your comment MUST say what you did, what you could not do, and the exact command or tool that was refused if anything was; finishing with an empty or header-only comment is a failure."
 
       - name: Upload attachments the agent saved (screenshots etc.)
         # 2 Oct 2026, hub gap #60: the agent writes PNGs into CASE_ATTACH_DIR
@@ -244,6 +244,22 @@ jobs:
         with:
           name: case-attachments-${{ github.run_id }}
           path: ${{ runner.temp }}/case-attachments
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Keep the agent's execution log (7 days)
+        # 7 Oct 2026: the agent finished sandbox issue #24 twice with a blank
+        # comment and no PR, and the only record of what it did (its tool calls,
+        # the two permission refusals) was claude-execution-output.json on a VM
+        # that no longer existed. The action writes that file under RUNNER_TEMP;
+        # this keeps it as a run artifact, same retention as the attachments, so a
+        # silent finish can be read instead of guessed at. Repo-scoped like the
+        # code it describes.
+        if: always() && steps.dedupe.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: case-execution-${{ github.run_id }}
+          path: ${{ runner.temp }}/claude-execution-output.json
           if-no-files-found: ignore
           retention-days: 7
 
