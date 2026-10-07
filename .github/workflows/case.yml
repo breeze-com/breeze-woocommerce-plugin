@@ -164,7 +164,9 @@ jobs:
                 "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git branch:*)",
                 "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push:*)",
                 "Bash(gh pr create:*)", "Bash(gh pr list:*)", "Bash(gh pr view:*)",
-                "Bash(gh issue list:*)", "Bash(gh issue view:*)", "Bash(gh issue comment:*)"
+                "Bash(gh issue list:*)", "Bash(gh issue view:*)", "Bash(gh issue comment:*)",
+                "Bash(case-screenshot:*)", "Bash(npx vite:*)", "Bash(npx playwright:*)", "Bash(python3 -m http.server:*)",
+                "Bash(mkdir:*)", "Bash(cp:*)", "Bash(ls:*)"
               ],
               "deny": [
                 "Edit(.github/workflows/**)", "Write(.github/workflows/**)", "Read(.github/workflows/**)",
@@ -196,6 +198,17 @@ jobs:
           fi
           cp .case/memory.md .case/memory.orig.md
 
+      - name: Attachments directory for the agent
+        # 2 Oct 2026: a requester asked CASE for a screenshot of a PR's UI change
+        # (hub gap #60, Cheryl, payment_dashboard#2585) and nothing in the run
+        # could carry a file out. Files the agent saves here are uploaded as an
+        # artifact below, and the bot's watcher posts them into the Slack thread
+        # that asked. CASE_ATTACH_DIR reaches the agent's Bash via GITHUB_ENV.
+        if: steps.dedupe.outputs.skip != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/case-attachments"
+          echo "CASE_ATTACH_DIR=$RUNNER_TEMP/case-attachments" >> "$GITHUB_ENV"
+
       - name: Run CASE
         if: steps.dedupe.outputs.skip != 'true'
         uses: anthropics/claude-code-action@v1
@@ -216,7 +229,80 @@ jobs:
             --max-turns 50
             --strict-mcp-config
             --settings ${{ runner.temp }}/case/settings.json
-            --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link."
+            --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link. When the request asks for a screenshot, a visual check, or what something looks like: render the change and save PNGs into ${{ runner.temp }}/case-attachments with descriptive file names. The requester receives those files in their Slack thread automatically, so name each file and say what it shows in your final comment. Build a throwaway harness outside the repo tree, under ${{ runner.temp }}, never committed and never pushed, that mounts the changed component with its hooks and data mocked; or run the repo's own dev server if it renders without credentials. Serve on localhost and capture with case-screenshot when that command exists on the runner, otherwise with npx playwright screenshot after npx playwright install chromium. Push no code unless code changes were also asked for. Never screenshot a page that shows real customer or merchant data. If your change alters anything a person sees in a browser (a component, a page, styles, copy), save screenshots of the result into ${{ runner.temp }}/case-attachments even when nobody asked for them; front-end reviewers expect to see the change before they review it, and the files you save there are posted on your pull request for you."
+
+      - name: Upload attachments the agent saved (screenshots etc.)
+        # 2 Oct 2026, hub gap #60: the agent writes PNGs into CASE_ATTACH_DIR
+        # (step above). This ships them as a run artifact named
+        # case-attachments-<run id>; the bot's stranded watcher lists a run's
+        # artifacts, downloads this one, and posts the files into the requester's
+        # Slack thread. Proven through the T2 proxy on the sandbox (run
+        # 36971710370) before this landed. Nothing saved = no artifact, no noise.
+        # Pinned to the v4 commit, same as every other third-party action here.
+        if: always() && steps.dedupe.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: case-attachments-${{ github.run_id }}
+          path: ${{ runner.temp }}/case-attachments
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Put the screenshots on the pull request
+        # 7 Oct 2026, Kim Guan on payment_dashboard#2585: "For front-end PRs, it
+        # is expected to have a screenshot of the changes before submitting for
+        # review." The Slack relay reaches the requester; the reviewer reads the
+        # PR. GitHub has no API for attaching an image to a comment, so the files
+        # the agent saved are committed to an orphan branch `case-attachments`
+        # of THIS repo under <run id>/ (every reviewer of the PR can already read
+        # the repo, so nothing new is granted and no other repo is involved) and
+        # the PR gets one comment that renders them. The agent never touches that
+        # branch; this step does, after the agent is done, with the same repo
+        # token. The comment carries no "/case", so it cannot re-trigger this
+        # workflow. Nothing saved, or no PR to attach to = nothing posted. Never
+        # reds the run.
+        if: steps.dedupe.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          NUM: ${{ github.event.issue.number || github.event.pull_request.number }}
+          ON_PR: ${{ (github.event.issue.pull_request || github.event.pull_request) && 'true' || 'false' }}
+        run: |
+          set -uo pipefail
+          DIR="$RUNNER_TEMP/case-attachments"
+          [ -d "$DIR" ] || { echo "no attachments directory"; exit 0; }
+          mapfile -t FILES < <(find "$DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.gif' \) -size -8M | sort | head -12)
+          [ "${#FILES[@]}" -gt 0 ] || { echo "no screenshots saved"; exit 0; }
+          if [ "$ON_PR" = "true" ]; then
+            PR="$NUM"
+          else
+            PR=$(gh pr list -R "$REPO" --state open --json number,headRefName \
+                 --jq --arg p "case/issue-${NUM}-" '[.[] | select(.headRefName | startswith($p))] | .[0].number // empty' 2>/dev/null || true)
+          fi
+          [ -n "${PR:-}" ] || { echo "no open CASE pull request for #${NUM}; the screenshots stay on the run page"; exit 0; }
+          W="$RUNNER_TEMP/case-shots"; rm -rf "$W"; mkdir -p "$W"
+          AUTH="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          G() { git -C "$W" -c "http.https://github.com/.extraheader=$AUTH" -c user.name=CASE -c user.email=case@users.noreply.github.com "$@"; }
+          G init -q
+          G remote add origin "https://github.com/${REPO}.git"
+          if G fetch -q --depth=1 origin case-attachments 2>/dev/null; then
+            G checkout -q -b case-attachments FETCH_HEAD
+          else
+            G checkout -q --orphan case-attachments
+          fi
+          mkdir -p "$W/$RUN_ID"
+          cp "${FILES[@]}" "$W/$RUN_ID/"
+          G add "$RUN_ID"
+          G commit -q -m "CASE screenshots, run ${RUN_ID}, PR #${PR}" || { echo "nothing to commit"; exit 0; }
+          G push -q origin HEAD:case-attachments || { echo "::warning::could not push the screenshots branch"; exit 0; }
+          BODY="Screenshots from this run (${RUN_URL}), saved by CASE so the change can be seen before review:"
+          for f in "${FILES[@]}"; do
+            n=$(basename "$f")
+            BODY="${BODY}"$'\n\n'"**${n}**"$'\n'"![${n}](https://github.com/${REPO}/blob/case-attachments/${RUN_ID}/${n}?raw=true)"
+          done
+          gh api "repos/${REPO}/issues/${PR}/comments" -f body="$BODY" >/dev/null \
+            || echo "::warning::could not post the screenshot comment"
 
       - name: Sync CASE memory + ledger to hub (via the minter; policed paths)
         if: always() && steps.dedupe.outputs.skip != 'true' && (steps.gauth.outputs.id_token != '' || steps.gauth2.outputs.id_token != '')
