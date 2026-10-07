@@ -141,7 +141,13 @@ jobs:
           echo "skip=false" >> "$GITHUB_OUTPUT"
           [ "$IS_ISSUE" = "true" ] && [ -n "${NUM:-}" ] || exit 0
           printf '%s' "${BODY:-}" | grep -qi '/case redo' && { echo "redo requested — running"; exit 0; }
-          EXISTING=$(gh pr list -R "${{ github.repository }}" --state open --json number,headRefName             --jq --arg p "case/issue-${NUM}-" '[.[] | select(.headRefName | startswith($p))] | .[0].number // empty' 2>/dev/null || true)
+          # `gh --jq` takes ONE expression string and no --arg (7 Oct 2026, caught by the
+          # Graphite review on payment_dashboard#2623): the old `--jq --arg p …` form made
+          # gh exit 1, `|| true` hid it, and this guard never matched anything. NUM comes
+          # from the event and is checked to be digits before it is spliced into jq.
+          [[ "$NUM" =~ ^[0-9]+$ ]] || exit 0
+          EXISTING=$(gh pr list -R "${{ github.repository }}" --state open --json number,headRefName \
+            --jq "[.[] | select(.headRefName | startswith(\"case/issue-${NUM}-\"))] | .[0].number // empty" 2>/dev/null || true)
           if [ -n "$EXISTING" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             gh issue comment "$NUM" -R "${{ github.repository }}" --body "There is already an open CASE pull request for this issue: #${EXISTING}. Review that one; if you want it redone from scratch, comment \`/case redo\`." >/dev/null 2>&1 || true
@@ -275,7 +281,7 @@ jobs:
         # branch; this step does, after the agent is done, with the same repo
         # token. The comment carries no "/case", so it cannot re-trigger this
         # workflow. Nothing saved, or no PR to attach to = nothing posted. Never
-        # reds the run.
+        # fails the run.
         if: steps.dedupe.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -293,8 +299,10 @@ jobs:
           if [ "$ON_PR" = "true" ]; then
             PR="$NUM"
           else
+            [[ "$NUM" =~ ^[0-9]+$ ]] || { echo "issue number is not numeric; nothing to attach to"; exit 0; }
+            # gh --jq takes one expression string and no --arg (7 Oct 2026, Graphite review on pd#2623).
             PR=$(gh pr list -R "$REPO" --state open --json number,headRefName \
-                 --jq --arg p "case/issue-${NUM}-" '[.[] | select(.headRefName | startswith($p))] | .[0].number // empty' 2>/dev/null || true)
+                 --jq "[.[] | select(.headRefName | startswith(\"case/issue-${NUM}-\"))] | .[0].number // empty" 2>/dev/null || true)
           fi
           [ -n "${PR:-}" ] || { echo "no open CASE pull request for #${NUM}; the screenshots stay on the run page"; exit 0; }
           W="$RUNNER_TEMP/case-shots"; rm -rf "$W"; mkdir -p "$W"
