@@ -40,6 +40,12 @@ env:
   # Rollout step 5 flips this: autonomous (no-requester) C1 PRs auto-merge.
   # Until then they are classified + labeled but left for humans.
   AUTONOMOUS_C1_MERGE: "true"
+  # 13 Oct 2026 (Marty): on every covered repo, a PR somebody asked for merges
+  # on its own once checks pass, whatever its tier; the tier stays as the audit
+  # record and `case-hold` (the Slack "escalate") keeps one for a human. The
+  # payment/CDE repos carry no merge lane and keep one human approval. Rolling
+  # back to requester-confirm / human-review is this list back to "c1".
+  AUTO_MERGE_TIERS: "c1,c2,c3"
 
 jobs:
   classify:
@@ -312,7 +318,7 @@ jobs:
             --input <(jq -n --arg t "case-${TIER}" '{labels:[$t]}') >/dev/null
           gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
             --input <(jq -n --arg t "$TIER" --arg r "$RAT" \
-              '{body:("**CASE merge tier: " + ($t|ascii_upcase) + "** — " + $r + "\n\nPolicy: C1 merges automatically once checks pass; C2 merges on the requester'"'"'s in-thread confirmation; C3 waits for a human reviewer with write access. Say `escalate` in the Slack thread to bump the tier.")}') >/dev/null
+              '{body:("**CASE merge tier: " + ($t|ascii_upcase) + "** — " + $r + "\n\nPolicy (13 Oct 2026): a requested change merges on its own once checks pass, at every tier; the tier is the audit record. Say `escalate` in the Slack thread, or add the `case-hold` label here, to keep it for a human reviewer.")}') >/dev/null
 
       - name: Parse Slack routing from the originating issue
         id: routing
@@ -409,9 +415,11 @@ jobs:
           # the queue write itself fails. Titles, not classifier rationale;
           # the rationale lives in the PR comment for engineers.
           T="${PR_TITLE#\[CASE\] }"
+          AUTO="false"
+          case ",${AUTO_MERGE_TIERS}," in *",${TIER},"*) AUTO="true" ;; esac
           queue_preview() {
             PF="preview/queue/$(echo "$GITHUB_REPOSITORY" | tr '/' '-')-pr${PR_NUM}-${GITHUB_RUN_ID}.json"
-            PB64=$(jq -n --arg r "$GITHUB_REPOSITORY" --arg p "$PR_NUM" --arg c "$CH" --arg t "$TH" --arg q "$RQ" --arg x "$TIER" --arg s "$T" '{repo:$r,pr:$p,channel:$c,thread:$t,requester:$q,tier:$x,title:$s}' | base64 -w0)
+            PB64=$(jq -n --arg r "$GITHUB_REPOSITORY" --arg p "$PR_NUM" --arg c "$CH" --arg t "$TH" --arg q "$RQ" --arg x "$TIER" --arg s "$T" --arg a "$AUTO" '{repo:$r,pr:$p,channel:$c,thread:$t,requester:$q,tier:$x,title:$s,auto:$a}' | base64 -w0)
             printf '%s' "$PB64" | base64 -d > "$RUNNER_TEMP/case/queue.json"
             minter_hub put "${PF}" "$RUNNER_TEMP/case/queue.json" "preview" >/dev/null
           }
@@ -420,11 +428,19 @@ jobs:
             c1) TEXT="Opened <${PR_URL}|PR #${PR_NUM}> — ${T}. It's a small, safe change, so it merges by itself once checks pass; I'll say here when it's in." ;;
             c2) if ! queue_preview; then
                   echo "::warning::preview queue write failed"
-                  TEXT="<@${RQ}> <${PR_URL}|PR #${PR_NUM}> is ready — ${T}. I couldn't build a preview this time. If it does what you asked, reply here (\"works, ship it\") or :+1: this message and I'll merge it. \`[case-pr ${GITHUB_REPOSITORY}#${PR_NUM} requester:${RQ}]\`"
+                  if [ "$AUTO" = "true" ]; then
+                    TEXT="<@${RQ}> <${PR_URL}|PR #${PR_NUM}> is ready — ${T}. I couldn't build a preview this time. It merges by itself once checks pass and I'll say here when it's in; if anything's off, tell me here and I'll fix it in a follow-up."
+                  else
+                    TEXT="<@${RQ}> <${PR_URL}|PR #${PR_NUM}> is ready — ${T}. I couldn't build a preview this time. If it does what you asked, reply here (\"works, ship it\") or :+1: this message and I'll merge it. \`[case-pr ${GITHUB_REPOSITORY}#${PR_NUM} requester:${RQ}]\`"
+                  fi
                 fi ;;
             *)  if ! queue_preview; then
                   echo "::warning::preview queue write failed"
-                  TEXT="<${PR_URL}|PR #${PR_NUM}> is up — ${T}. This one needs an engineer with write access to merge; I'll post here when it lands."
+                  if [ "$AUTO" = "true" ]; then
+                    TEXT="<${PR_URL}|PR #${PR_NUM}> is up — ${T}. It merges by itself once checks pass and I'll say here when it's in; if anything's off, tell me here and I'll fix it in a follow-up."
+                  else
+                    TEXT="<${PR_URL}|PR #${PR_NUM}> is up — ${T}. This one needs an engineer with write access to merge; I'll post here when it lands."
+                  fi
                 fi ;;
           esac
           [ -n "$TEXT" ] || { echo "preview queued; the preview lane posts the one message for this PR"; exit 0; }
@@ -434,10 +450,11 @@ jobs:
           minter_hub put "${FN}" "$RUNNER_TEMP/case/queue.json" "notify" >/dev/null \
             || echo "::warning::notify relay failed"
 
-      - name: C1 — test gate (no tokens in env; PR code runs here)
+      - name: Auto-merge — test gate (no tokens in env; PR code runs here)
         if: >-
-          steps.tier.outputs.tier == 'c1' &&
-          (steps.routing.outputs.channel != '' || env.AUTONOMOUS_C1_MERGE == 'true')
+          steps.tier.outputs.tier != '' &&
+          ((contains(env.AUTO_MERGE_TIERS, steps.tier.outputs.tier) && steps.routing.outputs.channel != '') ||
+           (steps.tier.outputs.tier == 'c1' && env.AUTONOMOUS_C1_MERGE == 'true'))
         run: |
           set -euo pipefail
           # This repo's own tests are part of the gate, not just hosted checks.
@@ -476,10 +493,12 @@ jobs:
             "$PM" test
           fi
 
-      - name: C1 — wait for checks, merge
+      - name: Auto-merge — wait for checks, merge
+        id: automerge
         if: >-
-          steps.tier.outputs.tier == 'c1' &&
-          (steps.routing.outputs.channel != '' || env.AUTONOMOUS_C1_MERGE == 'true')
+          steps.tier.outputs.tier != '' &&
+          ((contains(env.AUTO_MERGE_TIERS, steps.tier.outputs.tier) && steps.routing.outputs.channel != '') ||
+           (steps.tier.outputs.tier == 'c1' && env.AUTONOMOUS_C1_MERGE == 'true'))
         env:
           GH_TOKEN: ${{ steps.repo-token.outputs.token }}
           PR_NUM: ${{ github.event.pull_request.number }}
@@ -504,14 +523,23 @@ jobs:
             sleep 20
           done
           [ "${PEND:-1}" = "0" ] || { echo "::error::checks did not finish in time"; exit 1; }
+          # A hold set while checks ran wins: `case-hold` (Slack "escalate") or
+          # `case-human-edited` (a person pushed) leave the PR for a human.
+          HELD=$(gh pr view "$PR_NUM" --json labels --jq '[.labels[].name | select(. == "case-hold" or . == "case-human-edited")] | length')
+          if [ "${HELD:-0}" != "0" ]; then
+            echo "held for a human (case-hold / case-human-edited); not merging"
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # Pinned to the commit this run screened, tiered and tested. If the
           # branch moved in the meantime GitHub answers 409 and nothing merges
           # (14 Sep 2026, Claude Security).
           gh api -X PUT "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}/merge" -f merge_method=squash -f sha="${HEAD_SHA}" --jq .merged
+          echo "merged=true" >> "$GITHUB_OUTPUT"
 
       - name: Notify thread (merged)
         if: >-
-          success() && steps.tier.outputs.tier == 'c1' &&
+          success() && steps.automerge.outputs.merged == 'true' &&
           steps.routing.outputs.channel != '' && steps.routing.outputs.thread != ''
         env:
           GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
