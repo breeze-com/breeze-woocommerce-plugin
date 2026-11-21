@@ -180,6 +180,7 @@ jobs:
                 "Read(**/*.pem)", "Read(**/*.key)", "Read(**/*.p12)", "Read(**/*.pfx)",
                 "Read(**/.npmrc)", "Read(**/.netrc)", "Read(**/service-account*.json)",
                 "Read(**/*secret*)", "Read(**/*credential*)",
+                "Read(.git/config)", "Read(**/.git/config)", "Read(**/.git-credentials)",
                 "Bash(git merge:*)", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git remote:*)",
                 "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ncat:*)", "Bash(scp:*)",
                 "WebFetch", "WebSearch"
@@ -237,6 +238,109 @@ jobs:
             --settings ${{ runner.temp }}/case/settings.json
             --append-system-prompt "You are CASE, a governed coding agent. You open PRs for human review and NEVER merge; branch prefix 'case/'. Do not touch .github/workflows, secrets, deploy config, or the case hub repo. If your task came from an issue (label trigger) and you completed code work: after pushing your branch you MUST open the pull request yourself with 'gh pr create' (allowlisted), titled '[CASE] ...' and including 'Closes #<issue>'. Never finish by offering a compare/create-PR link. When the request asks for a screenshot, a visual check, or what something looks like: render the change and save PNGs into ${{ runner.temp }}/case-attachments with descriptive file names. The requester receives those files in their Slack thread automatically, so name each file and say what it shows in your final comment. Build a throwaway harness outside the repo tree, under ${{ runner.temp }}, never committed and never pushed, that mounts the changed component with its hooks and data mocked; or run the repo's own dev server if it renders without credentials. Serve on localhost and capture with case-screenshot when that command exists on the runner, otherwise with npx playwright screenshot after npx playwright install chromium. Push no code unless code changes were also asked for. Never screenshot a page that shows real customer or merchant data. If your change alters anything a person sees in a browser (a component, a page, styles, copy), save screenshots of the result into ${{ runner.temp }}/case-attachments even when nobody asked for them; front-end reviewers expect to see the change before they review it, and the files you save there are posted on your pull request for you. Before you finish, your comment MUST say what you did, what you could not do, and the exact command or tool that was refused if anything was; finishing with an empty or header-only comment is a failure."
 
+      - name: Scrub what leaves the runner (transcript + attachments)
+        id: scrub
+        # 21 Nov 2026 (Claude Security finding VPrMhm): GitHub masks secrets in
+        # the job LOG only. Artifact bytes are stored as written, and both
+        # artifacts below are readable by anyone who can read this repo for 7
+        # days. The transcript records every tool call and its output, so one
+        # `cat .git/config` or printed environment would put the repo token or
+        # the API key in a downloadable file. Before anything is uploaded:
+        #   - every credential this job holds is replaced in the transcript,
+        #     by exact value (plain and base64) and then by shape (GitHub
+        #     tokens, Anthropic keys, JWTs, auth headers, private keys);
+        #   - the attachments directory is cut down to real image/PDF files,
+        #     the only types the Slack relay posts.
+        # Fails closed: if the scrub errors, or a held value is still present
+        # afterwards, the transcript is deleted instead of uploaded; if it
+        # cannot even be deleted this step fails, and neither upload runs.
+        if: always() && steps.dedupe.outputs.skip != 'true'
+        env:
+          S_TOK: ${{ steps.app-token.outputs.token }}
+          S_AKEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          S_GID: ${{ steps.gauth.outputs.id_token || steps.gauth2.outputs.id_token }}
+          S_JOB: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, os, re, sys
+          tmp = os.environ.get("RUNNER_TEMP", "")
+          log = os.path.join(tmp, "claude-execution-output.json")
+          att = os.path.join(tmp, "case-attachments")
+
+          MAGIC = {".png": (b"\x89PNG\r\n\x1a\n",), ".jpg": (b"\xff\xd8\xff",), ".jpeg": (b"\xff\xd8\xff",),
+                   ".gif": (b"GIF87a", b"GIF89a"), ".pdf": (b"%PDF-",)}
+          if os.path.isdir(att):
+              for root, dirs, files in os.walk(att, topdown=False):
+                  for n in files:
+                      f = os.path.join(root, n)
+                      ok = False
+                      try:
+                          sigs = MAGIC.get(os.path.splitext(n)[1].lower())
+                          if sigs and root == att and not os.path.islink(f):
+                              with open(f, "rb") as h:
+                                  head = h.read(8)
+                              ok = any(head.startswith(s) for s in sigs)
+                      except Exception:
+                          ok = False
+                      if not ok:
+                          try:
+                              os.remove(f)
+                              print(f"attachments: dropped {n} (not an image or PDF)")
+                          except Exception:
+                              pass
+                  for d in dirs:
+                      try:
+                          os.rmdir(os.path.join(root, d))
+                      except Exception:
+                          pass
+
+          if not os.path.isfile(log) or os.path.islink(log):
+              if os.path.islink(log):
+                  os.remove(log)
+              sys.exit(0)
+          try:
+              held = set()
+              for k in ("S_TOK", "S_AKEY", "S_GID", "S_JOB", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"):
+                  v = os.environ.get(k, "").strip().encode()
+                  if len(v) >= 8:
+                      held.add(v)
+                      held.add(base64.b64encode(v))
+                      held.add(base64.b64encode(b"x-access-token:" + v))
+              shapes = [
+                  rb"gh[pousr]_[A-Za-z0-9]{20,}",
+                  rb"github_pat_[A-Za-z0-9_]{20,}",
+                  rb"sk-ant-[A-Za-z0-9_\-]{16,}",
+                  rb"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{6,}",
+                  rb"(?i)(?<=authorization: basic )[A-Za-z0-9+/=]{12,}",
+                  rb"(?i)(?<=authorization: bearer )[A-Za-z0-9+/=._\-]{12,}",
+                  rb"(?<=x-access-token:)[A-Za-z0-9_\-]{8,}",
+                  rb"xox[abeprs]-[A-Za-z0-9\-]{10,}",
+                  rb"AIza[A-Za-z0-9_\-]{30,}",
+                  rb"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+              ]
+              with open(log, "rb") as h:
+                  data = h.read()
+              n = 0
+              for v in sorted(held, key=len, reverse=True):
+                  n += data.count(v)
+                  data = data.replace(v, b"[REDACTED]")
+              for pat in shapes:
+                  data, c = re.subn(pat, b"[REDACTED]", data, flags=re.S)
+                  n += c
+              if any(v in data for v in held):
+                  raise RuntimeError("a held value survived the scrub")
+              with open(log, "wb") as h:
+                  h.write(data)
+              print(f"transcript: {n} value(s) redacted")
+          except Exception as e:
+              try:
+                  os.remove(log)
+              except Exception:
+                  print(f"::error::transcript scrub failed ({type(e).__name__}) and the transcript could not be deleted; nothing is uploaded")
+                  sys.exit(1)
+              print(f"::warning::transcript scrub failed ({type(e).__name__}); the transcript was deleted, not uploaded")
+          PY
+
       - name: Upload attachments the agent saved (screenshots etc.)
         # 2 Oct 2026, hub gap #60: the agent writes PNGs into CASE_ATTACH_DIR
         # (step above). This ships them as a run artifact named
@@ -245,7 +349,7 @@ jobs:
         # Slack thread. Proven through the T2 proxy on the sandbox (run
         # 36971710370) before this landed. Nothing saved = no artifact, no noise.
         # Pinned to the v4 commit, same as every other third-party action here.
-        if: always() && steps.dedupe.outputs.skip != 'true'
+        if: always() && steps.dedupe.outputs.skip != 'true' && steps.scrub.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: case-attachments-${{ github.run_id }}
@@ -261,7 +365,7 @@ jobs:
         # this keeps it as a run artifact, same retention as the attachments, so a
         # silent finish can be read instead of guessed at. Repo-scoped like the
         # code it describes.
-        if: always() && steps.dedupe.outputs.skip != 'true'
+        if: always() && steps.dedupe.outputs.skip != 'true' && steps.scrub.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: case-execution-${{ github.run_id }}
