@@ -388,7 +388,9 @@ jobs:
         # fails the run. always(): 23 Nov 2026, payment_dashboard#2992 was opened by
         # a run that then failed on the turn cap, so this step was skipped and a
         # front-end PR went to review with no screenshot.
-        if: always() && steps.dedupe.outputs.skip != 'true'
+        # Same scrub condition as the two uploads: if the scrub did not succeed,
+        # nothing the agent saved leaves the runner by this path either.
+        if: always() && steps.dedupe.outputs.skip != 'true' && steps.scrub.outcome == 'success'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
